@@ -1,0 +1,15 @@
+cd nanoserver-aspnet-x86
+call push.bat
+cd ..
+cd nanoserver-iis-aspnet-x64
+call push.bat
+cd ..
+cd nanoserver-iis-aspnet-x86
+call push.bat
+cd ..
+cd nanoserver-iis-netfx-x64
+call push.bat
+cd ..
+cd nanoserver-iis-netfx-x86
+call push.bat
+cd ..
