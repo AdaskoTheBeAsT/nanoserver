@@ -1,7 +1,7 @@
 # escape=`
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
 
-ARG DOTNET_VERSION=10.0.13
+ARG DOTNET_VERSION=10.0.14
 
 SHELL ["cmd", "/S", "/C"]
 
@@ -33,6 +33,11 @@ RUN setx /M PATH "%PATH%;C:\Program Files (x86)\dotnet"
 # Verify the x86 host and both shared frameworks.
 RUN dotnet --info
 RUN dotnet --list-runtimes
+
+# Install OS-level user-mode STA & window/message-queue shim for COM Single-Threaded Apartments (STA)
+COPY sta-shim C:\install\sta-shim
+RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim `
+    && rmdir /S /Q C:\install\sta-shim
 
 WORKDIR C:\app
 

@@ -1,9 +1,9 @@
 # escape=`
-ARG DOTNET_VERSION=10.0.13
+ARG DOTNET_VERSION=10.0.14
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer
 
-ARG DOTNET_VERSION=10.0.13
+ARG DOTNET_VERSION=10.0.14
 
 SHELL ["cmd", "/S", "/C"]
 WORKDIR C:\src
@@ -24,7 +24,7 @@ RUN curl.exe --fail --location --output C:\ancm.msi `
 
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
 
-ARG DOTNET_VERSION=10.0.13
+ARG DOTNET_VERSION=10.0.14
 
 SHELL ["cmd", "/S", "/C"]
 
@@ -80,6 +80,11 @@ RUN del /Q C:\inetpub\wwwroot\* `
     && mkdir C:\inetpub\wwwroot\logs `
     && icacls C:\inetpub\wwwroot /grant "IIS_IUSRS:(OI)(CI)RX" /T /Q `
     && icacls C:\inetpub\wwwroot\logs /grant "IIS_IUSRS:(OI)(CI)M" /T /Q
+
+# Install OS-level user-mode STA & window/message-queue shim for COM Single-Threaded Apartments (STA)
+COPY sta-shim C:\install\sta-shim
+RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim `
+    && rmdir /S /Q C:\install\sta-shim
 
 WORKDIR C:\inetpub\wwwroot
 

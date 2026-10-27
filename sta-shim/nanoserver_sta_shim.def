@@ -1,0 +1,7 @@
+EXPORTS
+    ApiSetQueryApiSetPresence=Shim_ApiSetQueryApiSetPresence
+    ApiSetQueryApiSetPresenceEx=Shim_ApiSetQueryApiSetPresenceEx
+    ResolveDelayLoadedAPI=Shim_ResolveDelayLoadedAPI
+    NanoServerStaShim_Refresh
+    NanoServerStaShim_RestoreOriginal
+    NanoServerStaShim_IsActive

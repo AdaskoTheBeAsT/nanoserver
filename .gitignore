@@ -98,6 +98,9 @@ StyleCopReport.xml
 *_i.c
 *_p.c
 *_h.h
+!**/NativeCOM_i.c
+!**/NativeCOM_p.c
+!**/NativeCOM_i.h
 *.ilk
 *.meta
 *.obj

@@ -58,6 +58,11 @@ RUN reg query "HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" /v Relea
 RUN del /Q C:\inetpub\wwwroot\* `
     && icacls C:\inetpub\wwwroot /grant "IIS_IUSRS:(OI)(CI)RX" /T /Q
 
+# Install OS-level user-mode STA & window/message-queue shim for COM Single-Threaded Apartments (STA)
+COPY sta-shim C:\install\sta-shim
+RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim `
+    && rmdir /S /Q C:\install\sta-shim
+
 WORKDIR C:\inetpub\wwwroot
 
 EXPOSE 80

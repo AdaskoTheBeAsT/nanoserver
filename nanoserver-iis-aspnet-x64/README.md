@@ -1,12 +1,12 @@
-# Nano Server 2025 — IIS + x64 ASP.NET Core 10 Host & Sample API
+# Nano Server 2025 — IIS + x64 ASP.NET Core 10 Host, Sample API & COM/STA Test Suite
 
 ## 1. Build, run, and push the reusable Host image
 
 From this directory:
 
-- Build: `go.bat` (`docker build -t adaskothebeast/nanoserver:iis-aspnet-x64 .`)
-- Run: `run.bat` (`docker run --rm -it -p 8080:80 adaskothebeast/nanoserver:iis-aspnet-x64`)
-- Tag & push: `push.bat`
+- Build: `go.ps1` (`docker build -t adaskothebeast/nanoserver:iis-aspnet-x64 .`)
+- Run: `run.ps1` (`docker run --rm -it -p 8080:80 adaskothebeast/nanoserver:iis-aspnet-x64`)
+- Tag & push: `push.ps1`
 
 Override the runtime version with `--build-arg DOTNET_VERSION=<version>`.
 
@@ -14,6 +14,21 @@ Override the runtime version with `--build-arg DOTNET_VERSION=<version>`.
 
 From `HealthApi\`:
 
-- Build: `go.bat` (`docker build -t adaskothebeast/nanoserver:iis-aspnet-x64-sample .`)
-- Run: `run.bat` (`docker run --rm -it -p 8080:80 adaskothebeast/nanoserver:iis-aspnet-x64-sample`)
+- Build: `go.ps1` (`docker build -t adaskothebeast/nanoserver:iis-aspnet-x64-sample .`)
+- Run: `run.ps1` (`docker run --rm -it -p 8080:80 adaskothebeast/nanoserver:iis-aspnet-x64-sample`)
 - Verify: `curl.exe --fail http://localhost:8080/health` (returns HTTP 200 with `{"status":"Healthy"}`)
+
+## 3. Build and run the COM & STA Interop Test Suite (`Tests`)
+
+From `Tests\`:
+
+- Build: `go.ps1` (`docker build -t adaskothebeast/nanoserver:iis-aspnet-x64-tests .`)
+- Run: `run.ps1` (`docker run --rm adaskothebeast/nanoserver:iis-aspnet-x64-tests`)
+
+### Included Test & Native COM Assets (`Tests\`)
+
+- `Tests\src\NativeCOM\` — C++ ATL COM server (`NativeCOM.dll`) source code (`StringConcatenator` coclass, IDL, RGS, vcxproj)
+- `Tests\src\NativeLifetimeProbe\` — C++ native lifetime probe DLL source code
+- `Tests\native\` — Prebuilt x64 `NativeCOM.dll`, `NativeCOM.manifest`, `Interop.NativeCOM.dll`, `NativeLifetimeProbe.dll`, and VC++ runtime DLLs
+- `Tests\src\AdaskoTheBeAsT.Interop.COM\` — `AdaskoTheBeAsT.Interop.COM` library source code (including in-process STA/window shim and SxS manifest fallback)
+- `Tests\AdaskoTheBeAsT.Interop.COM.Test\` — Full xUnit v3 test suite (`168` tests) executed across all 4 STA shim toggle modes (`Default`, `OS-Level STA Shim Only`, `Library In-Process STA Shim Only`, and `Both Disabled + Runtime Toggle`)
