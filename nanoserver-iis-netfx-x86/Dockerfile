@@ -26,6 +26,11 @@ COPY install_features.cmd C:\install\install_features.cmd
 
 RUN C:\install\install_features.cmd
 
+# Complete post-reboot CBS servicing (ResolvePendingTransactions) while Winmgmt is running
+RUN DISM /Online /Get-Capabilities >nul `
+    && (net stop TrustedInstaller >nul 2>&1 & del /F /Q C:\Windows\Logs\CBS\*.log C:\Windows\Logs\DISM\*.log >nul 2>&1) `
+    && (if exist C:\Windows\WinSxS\pending.xml (echo CBS pending.xml still present && exit /b 1))
+
 # Copy .NET Framework 4.8.1 (x86 + x64 + GAC), CLR CRT libraries, and 32-bit/64-bit IIS ASP.NET binaries
 # while keeping Nano Server's native C:\Windows\SysWOW64\forwarders and System32\forwarders intact.
 COPY --from=installer ["C:/Windows/Microsoft.NET/", "C:/Windows/Microsoft.NET/"]
@@ -36,7 +41,7 @@ COPY --from=installer ["C:/Windows/System32/inetsrv/", "C:/Windows/System32/inet
 COPY --from=installer ["C:/reg/", "C:/install/reg/"]
 
 # Import .NET Framework 4.8.1 and ASP.NET registry hives, mirror InetStp to WOW6432Node for 32-bit System.Web,
-# and configure DefaultAppPool for 32-bit (x86) .NET Framework 4.0 Integrated mode.
+# configure DefaultAppPool for 32-bit (x86) .NET Framework 4.0 Integrated mode, and validate installation.
 RUN reg import C:\install\reg\ndp64.reg `
     && reg import C:\install\reg\ndp32.reg `
     && reg import C:\install\reg\netfx64.reg `
@@ -47,15 +52,11 @@ RUN reg import C:\install\reg\ndp64.reg `
     && reg copy "HKLM\SOFTWARE\Microsoft\InetStp" "HKLM\SOFTWARE\WOW6432Node\Microsoft\InetStp" /s /f `
     && rmdir /S /Q C:\install\reg `
     && C:\Windows\System32\inetsrv\appcmd.exe set config -section:applicationPools /applicationPoolDefaults.enable32BitAppOnWin64:true /applicationPoolDefaults.managedRuntimeVersion:v4.0 /applicationPoolDefaults.managedPipelineMode:Integrated `
-    && C:\Windows\System32\inetsrv\appcmd.exe set apppool /apppool.name:DefaultAppPool /enable32BitAppOnWin64:true /managedRuntimeVersion:v4.0 /managedPipelineMode:Integrated
-
-# Validate 32-bit IIS worker process and .NET Framework 4.8.1 CLR
-RUN if exist C:\Windows\SysWOW64\inetsrv\w3wp.exe (echo 32-bit IIS worker present) else (echo 32-bit w3wp missing && exit /b 1)
-RUN if exist C:\Windows\Microsoft.NET\Framework\v4.0.30319\clr.dll (echo 32-bit .NET Framework 4.8.1 present) else (echo .NET Framework 4.8.1 missing && exit /b 1)
-RUN reg query "HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" /v Release
-
-# Prepare Default Web Site directory for downstream app images
-RUN del /Q C:\inetpub\wwwroot\* `
+    && C:\Windows\System32\inetsrv\appcmd.exe set apppool /apppool.name:DefaultAppPool /enable32BitAppOnWin64:true /managedRuntimeVersion:v4.0 /managedPipelineMode:Integrated `
+    && (if exist C:\Windows\SysWOW64\inetsrv\w3wp.exe (echo 32-bit IIS worker present) else (echo 32-bit w3wp missing && exit /b 1)) `
+    && (if exist C:\Windows\Microsoft.NET\Framework\v4.0.30319\clr.dll (echo 32-bit .NET Framework 4.8.1 present) else (echo .NET Framework 4.8.1 missing && exit /b 1)) `
+    && reg query "HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" /v Release `
+    && del /Q C:\inetpub\wwwroot\* `
     && icacls C:\inetpub\wwwroot /grant "IIS_IUSRS:(OI)(CI)RX" /T /Q
 
 # Install OS-level user-mode STA & window/message-queue shim for COM Single-Threaded Apartments (STA)
