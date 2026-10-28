@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+
+<assemblyIdentity name="NativeCOM" version="1.0.0.0" type="win32" processorArchitecture="x86"/>
+
+<description>Built with: Side-by-Side Manifest Maker (8.0.5431.0) (x64)</description>
+<description>Copyright: (c) Maze Solutions LLC. All rights reserved.</description>
+<description>Licensee: Adam Pluciński; Gdańsk, Poland</description>
+<description>License: 1 user license</description>
+
+<file name="NativeCOM.dll">
+ <comClass
+     clsid="{03d0aedd-2013-418a-8b92-e57c30f2ab26}"
+     description="StringConcatenator class"
+     tlbid="{4D04C8D8-6773-491B-BE1A-08F83268186D}"
+     threadingModel="apartment"/>
+ <typelib
+     tlbid="{4D04C8D8-6773-491B-BE1A-08F83268186D}"
+     version="1.0"
+     helpdir=""
+     flags="hasdiskimage"/>
+</file>
+
+<comInterfaceExternalProxyStub 
+     iid="{33413CE6-2665-4BC0-9D56-11B371DF7295}"
+     name="IStringConcatenator"
+     tlbid="{4D04C8D8-6773-491B-BE1A-08F83268186D}"
+     proxyStubClsid32="{00020424-0000-0000-C000-000000000046}"/>
+
+</assembly>
