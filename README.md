@@ -153,47 +153,47 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.1.0`, `-v1.1`, `-v1`).
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.2.0`, `-v1.2`, `-v1`).
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.1.0, -v1.1, and -v1
-.\set-version.ps1 -Version 1.1.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v1.2.0, -v1.2, and -v1
+.\set-version.ps1 -Version 1.2.0
 
 # Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.1.0 -DotNetVersion 10.0.14
+.\set-version.ps1 -Version 1.2.0 -DotNetVersion 10.0.14
 ```
 
 - **ASP.NET Core 10 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.1.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.1`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.2.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.2`
   - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
 - **ASP.NET Core 10 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.1.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.1`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.2.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.2`
   - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.1.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.1`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.2.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.2`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.1.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.1`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.2.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.2`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.1.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.1`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.2.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.2`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.1.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.1`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.2.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.2`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
 
 ---
@@ -492,17 +492,22 @@ Getting `combase.dll` to use our user-mode window engine automatically in *every
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  Step 1 (Container Build Time — install_sta_shim.exe)                        │
 │  • Safety Check: Aborts immediately if C:\Windows\System32\win32u.dll exists │
-│  • Removes "user32" and "ole32" from HKLM\...\Session Manager\KnownDlls      │
-│    so ntdll loads System32\user32.dll & ole32.dll from disk, not kernel RAM  │
+│  • Removes "user32", "ole32", and "gdi32" from HKLM\...\KnownDLLs            │
+│    so ntdll loads System32\user32.dll, ole32.dll & gdi32.dll from disk       │
 │  • Rewrites the PE Import Directory (IMAGE_IMPORT_DESCRIPTOR) of             │
-│    System32\forwarders\user32.dll & ole32.dll (and SysWOW64\forwarders\*)    │
-│    to add a static import on nanoserver_sta_shim.dll!NanoServerStaShim_Init  │
+│    System32\forwarders\user32.dll, ole32.dll, gdi32.dll & comctl32.dll       │
+│    (and SysWOW64\forwarders\*) to import nanoserver_sta_shim.dll             │
+│  • Rebuilds the PE Export Directory (.edata2) of gdi32.dll, user32.dll &     │
+│    comctl32.dll to add missing Win32 exports required by legacy Delphi/C++   │
+│    VCL/COM DLLs (CopyEnhMetaFileA, CreatePenIndirect, GetTextExtentPoint32A, │
+│    SetWinMetaFileBits, CreateIcon, GetKeyNameTextA, ImageList_Get/SetIconSize│
+│    forwarded to nanoserver_sta_shim.<ExportName>)                            │
 └──────────────────────────────────────┬───────────────────────────────────────┘
                                        │
                                        ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  Step 2 (Process Startup — ntdll.dll PE Loader)                              │
-│  • Process loads user32.dll or ole32.dll                                     │
+│  • Process loads user32.dll, ole32.dll, gdi32.dll, or comctl32.dll           │
 │  • PE loader automatically loads nanoserver_sta_shim.dll and runs DllMain    │
 └──────────────────────────────────────┬───────────────────────────────────────┘
                                        │
@@ -521,8 +526,8 @@ Getting `combase.dll` to use our user-mode window engine automatically in *every
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Why did `install_sta_shim.exe` have to remove `user32` and `ole32` from `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls`?
-Because at boot time, the Session Manager (`smss.exe`) pre-maps every DLL listed in `KnownDlls` into the kernel Object Manager directory `\KnownDlls` (64-bit) and `\KnownDlls32` (32-bit). When a process loads a DLL listed in `\KnownDlls`, `ntdll.dll` maps the cached section object and **ignores** changes on disk if the section is already pre-configured, or fails if a `KnownDll` depends on a non-`KnownDll`. Removing `user32` and `ole32` from the container's `KnownDlls` registry key forces `ntdll.dll` to load our patched `user32.dll` and `ole32.dll` cleanly from `C:\Windows\System32` (and `C:\Windows\SysWOW64`), pulling `nanoserver_sta_shim.dll` into every 32-bit and 64-bit COM process automatically!
+Why did `install_sta_shim.exe` have to remove `user32`, `ole32`, and `gdi32` from `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`?
+Because at boot time, the Session Manager (`smss.exe`) pre-maps every DLL listed in `KnownDLLs` into the kernel Object Manager directory `\KnownDlls` (64-bit) and `\KnownDlls32` (32-bit). When a process loads a DLL listed in `\KnownDlls`, `ntdll.dll` maps the cached section object and **ignores** changes on disk if the section is already pre-configured, or fails if a `KnownDll` depends on a non-`KnownDll`. Removing `user32`, `ole32`, and `gdi32` from the container's `KnownDLLs` registry key forces `ntdll.dll` to load our patched `user32.dll`, `ole32.dll`, and `gdi32.dll` cleanly from `C:\Windows\System32` (and `C:\Windows\SysWOW64`), pulling `nanoserver_sta_shim.dll` into every 32-bit and 64-bit COM/native process automatically!
 
 ### 5. Breakthrough #3: Solving the `0xc0370111` (`hcs::System::Start`) Post-DISM Servicing Race Condition in Docker Builds
 

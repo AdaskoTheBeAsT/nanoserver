@@ -5,3 +5,12 @@ EXPORTS
     NanoServerStaShim_Refresh
     NanoServerStaShim_RestoreOriginal
     NanoServerStaShim_IsActive
+    CopyEnhMetaFileA=Shim_CopyEnhMetaFileA
+    CreatePenIndirect=Shim_CreatePenIndirect
+    GetTextExtentPoint32A=Shim_GetTextExtentPoint32A
+    SetWinMetaFileBits=Shim_SetWinMetaFileBits
+    CreateIcon=Shim_CreateIcon
+    GetKeyNameTextA=Shim_GetKeyNameTextA
+    ImageList_GetIconSize=Shim_ImageList_GetIconSize
+    ImageList_SetIconSize=Shim_ImageList_SetIconSize
+

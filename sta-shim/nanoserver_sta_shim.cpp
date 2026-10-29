@@ -1082,6 +1082,94 @@ HRESULT WINAPI Shim_CoInitialize(LPVOID pvReserved) {
     return CoInitializeEx(pvReserved, 0x2 /* COINIT_APARTMENTTHREADED */);
 }
 
+extern "C" HANDLE WINAPI Shim_CopyEnhMetaFileA(HANDLE hemfSrc, LPCSTR lpszFile) {
+    (void)lpszFile;
+    return hemfSrc ? hemfSrc : reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484D01u));
+}
+
+extern "C" HANDLE WINAPI Shim_CreatePenIndirect(const void* plpen) {
+    (void)plpen;
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484D02u));
+}
+
+extern "C" BOOL WINAPI Shim_GetTextExtentPoint32A(HANDLE hdc, LPCSTR lpString, int c, LPSIZE psizl) {
+    (void)hdc;
+    if (!psizl) {
+        return FALSE;
+    }
+    if (c < 0) {
+        c = lpString ? static_cast<int>(strlen(lpString)) : 0;
+    }
+    psizl->cx = (c > 0) ? (c * 8) : 0;
+    psizl->cy = 16;
+    return TRUE;
+}
+
+extern "C" HANDLE WINAPI Shim_SetWinMetaFileBits(
+    UINT nSize,
+    const BYTE* lpMeta16Data,
+    HANDLE hdcRef,
+    const void* lpMFP) {
+    (void)nSize;
+    (void)lpMeta16Data;
+    (void)hdcRef;
+    (void)lpMFP;
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484D03u));
+}
+
+extern "C" HANDLE WINAPI Shim_CreateIcon(
+    HINSTANCE hInstance,
+    int nWidth,
+    int nHeight,
+    BYTE cPlanes,
+    BYTE cBitsPixel,
+    const BYTE* lpbANDbits,
+    const BYTE* lpbXORbits) {
+    (void)hInstance;
+    (void)nWidth;
+    (void)nHeight;
+    (void)cPlanes;
+    (void)cBitsPixel;
+    (void)lpbANDbits;
+    (void)lpbXORbits;
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484D04u));
+}
+
+extern "C" int WINAPI Shim_GetKeyNameTextA(LONG lParam, LPSTR lpString, int cchSize) {
+    (void)lParam;
+    if (!lpString || cchSize <= 0) {
+        return 0;
+    }
+    const char* kDefaultKeyName = "Key";
+    int copyLen = 3;
+    if (copyLen >= cchSize) {
+        copyLen = cchSize - 1;
+    }
+    if (copyLen > 0) {
+        memcpy(lpString, kDefaultKeyName, static_cast<size_t>(copyLen));
+    }
+    lpString[copyLen] = '\0';
+    return copyLen;
+}
+
+extern "C" BOOL WINAPI Shim_ImageList_GetIconSize(PVOID himl, int* cx, int* cy) {
+    (void)himl;
+    if (cx) {
+        *cx = 16;
+    }
+    if (cy) {
+        *cy = 16;
+    }
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_ImageList_SetIconSize(PVOID himl, int cx, int cy) {
+    (void)himl;
+    (void)cx;
+    (void)cy;
+    return TRUE;
+}
+
 struct ExportMapping {
     const char* Name;
     PVOID Target;
@@ -1126,6 +1214,14 @@ const ExportMapping kExportTable[] = {
     {"MessageBeep", reinterpret_cast<PVOID>(Shim_MessageBeep)},
     {"RegisterClipboardFormatW", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatW)},
     {"CoInitialize", reinterpret_cast<PVOID>(Shim_CoInitialize)},
+    {"CopyEnhMetaFileA", reinterpret_cast<PVOID>(Shim_CopyEnhMetaFileA)},
+    {"CreatePenIndirect", reinterpret_cast<PVOID>(Shim_CreatePenIndirect)},
+    {"GetTextExtentPoint32A", reinterpret_cast<PVOID>(Shim_GetTextExtentPoint32A)},
+    {"SetWinMetaFileBits", reinterpret_cast<PVOID>(Shim_SetWinMetaFileBits)},
+    {"CreateIcon", reinterpret_cast<PVOID>(Shim_CreateIcon)},
+    {"GetKeyNameTextA", reinterpret_cast<PVOID>(Shim_GetKeyNameTextA)},
+    {"ImageList_GetIconSize", reinterpret_cast<PVOID>(Shim_ImageList_GetIconSize)},
+    {"ImageList_SetIconSize", reinterpret_cast<PVOID>(Shim_ImageList_SetIconSize)},
 };
 
 PVOID ResolveShimFunction(const char* name) {
