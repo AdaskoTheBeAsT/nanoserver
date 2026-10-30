@@ -10,6 +10,9 @@
 #include <stdio.h>
 #include <vector>
 #include <string>
+#include <algorithm>
+#include <bitset>
+#include <memory>
 
 extern "C" HRESULT WINAPI CoInitializeEx(LPVOID pvReserved, DWORD dwCoInit);
 
@@ -70,6 +73,9 @@ struct DelayLoadSlot {
 
 struct ModuleHookState {
     HMODULE ModuleBase = nullptr;
+    DWORD ImageSize = 0;
+    bool HasAppliedState = false;
+    bool LastAppliedEnable = false;
     PVOID* PresenceIatSlot = nullptr;
     PVOID* PresenceExIatSlot = nullptr;
     PVOID* ResolveDelayLoadIatSlot = nullptr;
@@ -91,6 +97,12 @@ struct WindowClassEntry {
     int ClsExtra = 0;
     int WndExtra = 0;
     HINSTANCE HInstance = nullptr;
+    HICON Icon = nullptr;
+    HICON SmallIcon = nullptr;
+    HCURSOR Cursor = nullptr;
+    HBRUSH Background = nullptr;
+    std::wstring MenuName;
+    LPCWSTR MenuResource = nullptr;
 };
 
 struct WindowEntry {
@@ -106,6 +118,10 @@ struct WindowEntry {
     std::wstring ClassName;
     std::wstring WindowName;
     std::vector<BYTE> ExtraBytes;
+    ATOM ClassAtom = 0;
+    HINSTANCE ClassInstance = nullptr;
+    bool GlobalClass = false;
+    bool Destroying = false;
 };
 
 struct QueuedMessage {
@@ -116,6 +132,8 @@ struct QueuedMessage {
     DWORD Time = 0;
 };
 
+enum class SendState { Pending, Dispatched, Completed, Cancelled };
+
 struct SentMessageItem {
     HWND HWnd = nullptr;
     UINT Message = 0;
@@ -123,15 +141,39 @@ struct SentMessageItem {
     LPARAM LParam = 0;
     LRESULT Result = 0;
     HANDLE DoneEvent = nullptr;
+    SendState State = SendState::Pending;
+    DWORD Error = ERROR_SUCCESS;
+
+    ~SentMessageItem() {
+        if (DoneEvent) CloseHandle(DoneEvent);
+    }
+};
+
+struct TimerEntry {
+    HWND HWnd = nullptr;
+    UINT_PTR Id = 0;
+    UINT Elapse = 0;
+    TIMERPROC Callback = nullptr;
+    ULONGLONG Deadline = 0;
+    bool Ready = false;
 };
 
 struct ThreadMessageQueue {
     DWORD ThreadId = 0;
     HANDLE WakeEvent = nullptr;
     LONG InSendMessageDepth = 0;
-    LONG WaitingCount = 0;
+    bool Exiting = false;
+    bool QuitPending = false;
+    WPARAM QuitExitCode = 0;
+    UINT ChangedMask = 0;
+    ULONGLONG ChangeCounter = 0;
     std::vector<QueuedMessage> Posted;
-    std::vector<SentMessageItem*> Sent;
+    std::vector<std::shared_ptr<SentMessageItem>> Sent;
+    std::vector<TimerEntry> Timers;
+
+    ~ThreadMessageQueue() {
+        if (WakeEvent) CloseHandle(WakeEvent);
+    }
 };
 
 struct ClipboardFormatEntry {
@@ -141,16 +183,18 @@ struct ClipboardFormatEntry {
 
 CRITICAL_SECTION g_HookLock;
 CRITICAL_SECTION g_WindowLock;
-bool g_LocksInitialized = false;
+INIT_ONCE g_LocksOnce = INIT_ONCE_STATIC_INIT;
+DWORD g_QueueFls = FLS_OUT_OF_INDEXES;
 bool g_IsActive = false;
 
 std::vector<ModuleHookState> g_HookedModules;
 std::vector<WindowClassEntry> g_WindowClasses;
 std::vector<WindowEntry> g_Windows;
-std::vector<ThreadMessageQueue*> g_ThreadQueues;
+std::vector<std::shared_ptr<ThreadMessageQueue>> g_ThreadQueues;
 std::vector<ClipboardFormatEntry> g_ClipboardFormats;
 
-LONG g_NextAtom = 0;
+std::bitset<0x4000> g_ClassAtoms;
+UINT g_NextAtom = 0;
 LONG g_NextHwnd = 0x10000;
 LONG g_NextTimerId = 0x3000;
 LONG g_NextClipboardFormat = 0xC000;
@@ -174,13 +218,31 @@ const char* const kShimmedPrefixes[] = {
     "ext-ms-win-com-sta-l1-",
 };
 
-void EnsureLocksInitialized() {
-    if (!g_LocksInitialized) {
-        InitializeCriticalSection(&g_HookLock);
-        InitializeCriticalSection(&g_WindowLock);
-        g_LocksInitialized = true;
-    }
+VOID CALLBACK OnQueueThreadExit(PVOID value);
+
+BOOL CALLBACK InitializeLocks(PINIT_ONCE, PVOID, PVOID*) {
+    InitializeCriticalSection(&g_HookLock);
+    InitializeCriticalSection(&g_WindowLock);
+    g_QueueFls = FlsAlloc(OnQueueThreadExit);
+    return TRUE;
 }
+
+void EnsureLocksInitialized() {
+    InitOnceExecuteOnce(&g_LocksOnce, InitializeLocks, nullptr, nullptr);
+}
+
+class ScopedLock {
+public:
+    explicit ScopedLock(CRITICAL_SECTION& lock) : Lock(lock) {
+        EnsureLocksInitialized();
+        EnterCriticalSection(&Lock);
+    }
+    ~ScopedLock() { LeaveCriticalSection(&Lock); }
+    ScopedLock(const ScopedLock&) = delete;
+    ScopedLock& operator=(const ScopedLock&) = delete;
+private:
+    CRITICAL_SECTION& Lock;
+};
 
 char ToLowerAscii(char c) {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
@@ -282,710 +344,1053 @@ bool IsOsShimDisabledByEnv() {
            EqualsIgnoreCaseWide(val, L"yes");
 }
 
-void WritePointerWithProtection(PVOID* address, PVOID value) {
-    DWORD oldProtect = 0;
-    if (VirtualProtect(address, sizeof(PVOID), PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        *address = value;
-        VirtualProtect(address, sizeof(PVOID), oldProtect, &oldProtect);
+template<typename T>
+bool WriteWithProtection(T* address, T value) {
+    ScopedLock lock(g_HookLock);
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!address || VirtualQuery(address, &memory, sizeof(memory)) != sizeof(memory) ||
+        memory.State != MEM_COMMIT || (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+        memory.RegionSize < sizeof(T) ||
+        reinterpret_cast<ULONG_PTR>(address) - reinterpret_cast<ULONG_PTR>(memory.BaseAddress) >
+            memory.RegionSize - sizeof(T)) {
+        SetLastError(ERROR_INVALID_ADDRESS);
+        return false;
     }
+    if (*address == value) return true;
+    DWORD protection = memory.Protect & 0xFFu;
+    bool executable = protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ ||
+                      protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+    DWORD writable = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+    writable |= memory.Protect & (PAGE_NOCACHE | PAGE_WRITECOMBINE);
+    DWORD original = 0;
+    if (!VirtualProtect(address, sizeof(T), writable, &original)) return false;
+    *address = value;
+    DWORD ignored = 0;
+    return VirtualProtect(address, sizeof(T), original, &ignored) != FALSE;
 }
 
-void WriteInt32WithProtection(int* address, int value) {
-    DWORD oldProtect = 0;
-    if (VirtualProtect(address, sizeof(int), PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        *address = value;
-        VirtualProtect(address, sizeof(int), oldProtect, &oldProtect);
-    }
+bool WritePointerWithProtection(PVOID* address, PVOID value) {
+    return WriteWithProtection(address, value);
 }
 
-ThreadMessageQueue* GetOrCreateQueueLocked(DWORD threadId) {
-    for (ThreadMessageQueue* q : g_ThreadQueues) {
-        if (q->ThreadId == threadId) {
-            return q;
-        }
-    }
-    auto* q = new ThreadMessageQueue();
-    q->ThreadId = threadId;
-    q->WakeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    g_ThreadQueues.push_back(q);
-    return q;
+bool WriteInt32WithProtection(int* address, int value) {
+    return WriteWithProtection(address, value);
 }
 
-ThreadMessageQueue* GetOrCreateQueue(DWORD threadId) {
-    EnterCriticalSection(&g_WindowLock);
-    ThreadMessageQueue* q = GetOrCreateQueueLocked(threadId);
-    LeaveCriticalSection(&g_WindowLock);
-    return q;
+constexpr UINT kAllQueueBits = 0x1DFFu;
+constexpr UINT kPostedBits = QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+
+std::shared_ptr<ThreadMessageQueue> FindQueueLocked(DWORD threadId) {
+    for (const auto& queue : g_ThreadQueues) {
+        if (queue->ThreadId == threadId && !queue->Exiting) return queue;
+    }
+    return {};
 }
 
-std::wstring ExtractClassName(LPCWSTR classNamePtr) {
-    if (!classNamePtr) {
-        return L"";
-    }
-    ULONG_PTR raw = reinterpret_cast<ULONG_PTR>(classNamePtr);
-    if ((raw & ~static_cast<ULONG_PTR>(0xFFFF)) == 0) {
-        ATOM atom = static_cast<ATOM>(raw & 0xFFFF);
-        EnterCriticalSection(&g_WindowLock);
-        for (const auto& cls : g_WindowClasses) {
-            if (cls.Atom == atom) {
-                std::wstring result = cls.ClassName;
-                LeaveCriticalSection(&g_WindowLock);
-                return result;
-            }
-        }
-        LeaveCriticalSection(&g_WindowLock);
-        wchar_t atomBuf[32] = {};
-        swprintf_s(atomBuf, L"#%u", static_cast<unsigned int>(atom));
-        return atomBuf;
-    }
-    return std::wstring(classNamePtr);
+void QueueChangedLocked(ThreadMessageQueue& queue, UINT categories = 0) {
+    queue.ChangedMask |= categories;
+    ++queue.ChangeCounter;
+    SetEvent(queue.WakeEvent);
+}
+
+UINT MessageCategory(UINT message) {
+    UINT bits = kPostedBits;
+    if (message >= WM_KEYFIRST && message <= WM_KEYLAST) bits |= QS_KEY;
+    if (message == WM_MOUSEMOVE || message == WM_NCMOUSEMOVE) bits |= QS_MOUSEMOVE;
+    if ((message >= WM_LBUTTONDOWN && message <= WM_MOUSELAST) ||
+        (message >= WM_NCLBUTTONDOWN && message <= WM_NCXBUTTONDBLCLK)) bits |= QS_MOUSEBUTTON;
+    if (message == WM_TIMER) bits |= QS_TIMER;
+    if (message == WM_PAINT) bits |= QS_PAINT;
+    if (message == WM_HOTKEY) bits |= QS_HOTKEY;
+    if (message == WM_INPUT) bits |= QS_RAWINPUT;
+    return bits;
 }
 
 WindowEntry* FindWindowLocked(HWND hWnd) {
-    for (auto& w : g_Windows) {
-        if (w.HWnd == hWnd) {
-            return &w;
-        }
+    for (auto& window : g_Windows) {
+        if (window.HWnd == hWnd) return &window;
     }
     return nullptr;
 }
 
+void CancelSendLocked(SentMessageItem& item, DWORD error) {
+    item.Result = 0;
+    item.Error = error;
+    item.State = SendState::Cancelled;
+    SetEvent(item.DoneEvent);
+}
+
+void RemoveWindowLocked(HWND hWnd) {
+    g_Windows.erase(std::remove_if(g_Windows.begin(), g_Windows.end(),
+        [hWnd](const WindowEntry& window) { return window.HWnd == hWnd; }), g_Windows.end());
+    for (const auto& queue : g_ThreadQueues) {
+        queue->Timers.erase(std::remove_if(queue->Timers.begin(), queue->Timers.end(),
+            [hWnd](const TimerEntry& timer) { return timer.HWnd == hWnd; }), queue->Timers.end());
+        queue->Posted.erase(std::remove_if(queue->Posted.begin(), queue->Posted.end(),
+            [hWnd](const QueuedMessage& message) { return message.HWnd == hWnd; }), queue->Posted.end());
+        for (auto it = queue->Sent.begin(); it != queue->Sent.end();) {
+            if ((*it)->HWnd == hWnd && (*it)->State == SendState::Pending) {
+                CancelSendLocked(**it, kErrorInvalidWindowHandle);
+                it = queue->Sent.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        QueueChangedLocked(*queue);
+    }
+}
+
+VOID CALLBACK OnQueueThreadExit(PVOID value) {
+    auto* owner = static_cast<std::shared_ptr<ThreadMessageQueue>*>(value);
+    if (!owner) return;
+    auto queue = *owner;
+    {
+        ScopedLock lock(g_WindowLock);
+        queue->Exiting = true;
+        for (const auto& item : queue->Sent) CancelSendLocked(*item, ERROR_INVALID_THREAD_ID);
+        queue->Sent.clear();
+        queue->Posted.clear();
+        queue->Timers.clear();
+        g_Windows.erase(std::remove_if(g_Windows.begin(), g_Windows.end(),
+            [&queue](const WindowEntry& window) { return window.ThreadId == queue->ThreadId; }), g_Windows.end());
+        g_ThreadQueues.erase(std::remove(g_ThreadQueues.begin(), g_ThreadQueues.end(), queue), g_ThreadQueues.end());
+        QueueChangedLocked(*queue);
+    }
+    delete owner;
+}
+
+std::shared_ptr<ThreadMessageQueue> GetCurrentThreadQueue() {
+    EnsureLocksInitialized();
+    if (g_QueueFls == FLS_OUT_OF_INDEXES) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return {};
+    }
+    auto* owner = static_cast<std::shared_ptr<ThreadMessageQueue>*>(FlsGetValue(g_QueueFls));
+    if (owner) return *owner;
+    try {
+        auto queue = std::make_shared<ThreadMessageQueue>();
+        queue->ThreadId = GetCurrentThreadId();
+        queue->WakeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!queue->WakeEvent) return {};
+        auto holder = std::make_unique<std::shared_ptr<ThreadMessageQueue>>(queue);
+        ScopedLock lock(g_WindowLock);
+        g_ThreadQueues.push_back(queue);
+        if (!FlsSetValue(g_QueueFls, holder.get())) {
+            g_ThreadQueues.pop_back();
+            return {};
+        }
+        holder.release();
+        return queue;
+    } catch (const std::bad_alloc&) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return {};
+    }
+}
+
+bool HasPendingSendsLocked(const ThreadMessageQueue& queue) {
+    return std::any_of(queue.Sent.begin(), queue.Sent.end(),
+        [](const std::shared_ptr<SentMessageItem>& item) { return item->State == SendState::Pending; });
+}
+
 WNDPROC GetWndProcForWindow(HWND hWnd) {
-    if (!hWnd) {
-        return nullptr;
-    }
-    EnterCriticalSection(&g_WindowLock);
+    ScopedLock lock(g_WindowLock);
     WindowEntry* entry = FindWindowLocked(hWnd);
-    WNDPROC proc = entry ? entry->WndProc : nullptr;
-    LeaveCriticalSection(&g_WindowLock);
-    return proc;
+    return entry && entry->ThreadId == GetCurrentThreadId() ? entry->WndProc : nullptr;
 }
 
-LRESULT InvokeWindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT InvokeWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     WNDPROC proc = GetWndProcForWindow(hWnd);
-    if (!proc) {
-        return 0;
-    }
-    return proc(hWnd, msg, wParam, lParam);
+    return proc ? proc(hWnd, message, wParam, lParam) : 0;
 }
 
-void ProcessSentMessages(ThreadMessageQueue* queue) {
-    while (true) {
-        SentMessageItem* item = nullptr;
-        EnterCriticalSection(&g_WindowLock);
-        if (queue->Sent.empty()) {
-            if (queue->Posted.empty()) {
-                ResetEvent(queue->WakeEvent);
+void ProcessSentMessages(const std::shared_ptr<ThreadMessageQueue>& queue) {
+    for (;;) {
+        std::shared_ptr<SentMessageItem> item;
+        {
+            ScopedLock lock(g_WindowLock);
+            if (queue->Exiting) return;
+            for (const auto& candidate : queue->Sent) {
+                if (candidate->State == SendState::Pending) {
+                    item = candidate;
+                    break;
+                }
             }
-            LeaveCriticalSection(&g_WindowLock);
-            return;
-        }
-        item = queue->Sent.front();
-        queue->Sent.erase(queue->Sent.begin());
-        LeaveCriticalSection(&g_WindowLock);
-
-        InterlockedIncrement(&queue->InSendMessageDepth);
-        item->Result = InvokeWindowProc(item->HWnd, item->Message, item->WParam, item->LParam);
-        InterlockedDecrement(&queue->InSendMessageDepth);
-        SetEvent(item->DoneEvent);
-    }
-}
-
-bool MatchesWindowFilter(HWND msgHwnd, HWND filterHwnd) {
-    if (!filterHwnd) {
-        return true;
-    }
-    if (filterHwnd == reinterpret_cast<HWND>(static_cast<LONG_PTR>(-1))) {
-        return msgHwnd == nullptr;
-    }
-    return msgHwnd == filterHwnd;
-}
-
-bool MatchesMessageFilter(UINT msg, UINT minFilter, UINT maxFilter) {
-    return (minFilter == 0 && maxFilter == 0) || (msg >= minFilter && msg <= maxFilter);
-}
-
-bool TryDequeueMessage(
-    ThreadMessageQueue* queue,
-    HWND hWndFilter,
-    UINT minFilter,
-    UINT maxFilter,
-    bool remove,
-    QueuedMessage* outMsg) {
-    EnterCriticalSection(&g_WindowLock);
-    for (size_t i = 0; i < queue->Posted.size(); ++i) {
-        const QueuedMessage& candidate = queue->Posted[i];
-        if (!MatchesWindowFilter(candidate.HWnd, hWndFilter) ||
-            !MatchesMessageFilter(candidate.Message, minFilter, maxFilter)) {
-            continue;
-        }
-        *outMsg = candidate;
-        if (remove) {
-            queue->Posted.erase(queue->Posted.begin() + static_cast<ptrdiff_t>(i));
-            if (queue->Posted.empty() && queue->Sent.empty()) {
-                ResetEvent(queue->WakeEvent);
+            if (!item) return;
+            if (!FindWindowLocked(item->HWnd)) {
+                CancelSendLocked(*item, kErrorInvalidWindowHandle);
+                queue->Sent.erase(std::remove(queue->Sent.begin(), queue->Sent.end(), item), queue->Sent.end());
+                continue;
             }
+            item->State = SendState::Dispatched;
+            ++queue->InSendMessageDepth;
         }
-        LeaveCriticalSection(&g_WindowLock);
-        return true;
+        LRESULT result = InvokeWindowProc(item->HWnd, item->Message, item->WParam, item->LParam);
+        {
+            ScopedLock lock(g_WindowLock);
+            --queue->InSendMessageDepth;
+            item->Result = result;
+            item->State = SendState::Completed;
+            queue->Sent.erase(std::remove(queue->Sent.begin(), queue->Sent.end(), item), queue->Sent.end());
+            SetEvent(item->DoneEvent);
+        }
     }
-    LeaveCriticalSection(&g_WindowLock);
+}
+
+bool IsChildLocked(HWND parent, HWND child) {
+    if (!parent || parent == child || !FindWindowLocked(parent)) return false;
+    for (size_t depth = 0; depth < g_Windows.size(); ++depth) {
+        WindowEntry* entry = FindWindowLocked(child);
+        if (!entry || (entry->Style & WS_CHILD) == 0) return false;
+        child = entry->Parent;
+        if (child == parent) return true;
+        if (!child) return false;
+    }
     return false;
 }
 
-bool QueueHasMessages(ThreadMessageQueue* queue) {
-    EnterCriticalSection(&g_WindowLock);
-    bool has = !queue->Posted.empty() || !queue->Sent.empty();
-    LeaveCriticalSection(&g_WindowLock);
-    return has;
+bool MatchesWindowFilter(HWND messageWindow, HWND filterWindow) {
+    if (!filterWindow) return true;
+    if (filterWindow == reinterpret_cast<HWND>(static_cast<LONG_PTR>(-1))) return messageWindow == nullptr;
+    return messageWindow == filterWindow || IsChildLocked(filterWindow, messageWindow);
 }
 
-ATOM RegisterClassCommon(
-    const std::wstring& className,
-    UINT style,
-    WNDPROC wndProc,
-    int clsExtra,
-    int wndExtra,
-    HINSTANCE hInstance) {
-    if (className.empty()) {
-        return 0;
-    }
-    EnterCriticalSection(&g_WindowLock);
-    for (auto& cls : g_WindowClasses) {
-        if (EqualsIgnoreCaseWide(cls.ClassName, className)) {
-            cls.Style = style;
-            cls.WndProc = wndProc;
-            cls.ClsExtra = clsExtra;
-            cls.WndExtra = wndExtra;
-            cls.HInstance = hInstance;
-            ATOM atom = cls.Atom;
-            LeaveCriticalSection(&g_WindowLock);
-            return atom;
+bool MatchesMessageFilter(UINT message, UINT minimum, UINT maximum) {
+    return (minimum == 0 && maximum == 0) || (message >= minimum && message <= maximum);
+}
+
+void UpdateTimersLocked(ThreadMessageQueue& queue) {
+    if (queue.Timers.empty()) return;
+    ULONGLONG now = GetTickCount64();
+    for (auto& timer : queue.Timers) {
+        if (!timer.Ready && now >= timer.Deadline) {
+            timer.Ready = true;
+            QueueChangedLocked(queue, QS_TIMER);
         }
     }
-    LONG next = InterlockedIncrement(&g_NextAtom);
-    ATOM atom = static_cast<ATOM>(0xC000 | (next & 0x3FFF));
+}
+
+UINT CurrentQueueBitsLocked(const ThreadMessageQueue& queue) {
+    UINT bits = queue.QuitPending ? kPostedBits : 0;
+    for (const auto& message : queue.Posted) bits |= MessageCategory(message.Message);
+    if (HasPendingSendsLocked(queue)) bits |= QS_SENDMESSAGE;
+    for (const auto& timer : queue.Timers) {
+        if (timer.Ready) bits |= QS_TIMER;
+    }
+    return bits;
+}
+
+DWORD NextTimerDelayLocked(const ThreadMessageQueue& queue, HWND filterWindow = nullptr,
+                          UINT minimum = 0, UINT maximum = 0) {
+    DWORD delay = INFINITE;
+    if (!MatchesMessageFilter(WM_TIMER, minimum, maximum)) return delay;
+    ULONGLONG now = GetTickCount64();
+    for (const auto& timer : queue.Timers) {
+        if (timer.Ready || !MatchesWindowFilter(timer.HWnd, filterWindow)) continue;
+        ULONGLONG remaining = timer.Deadline > now ? timer.Deadline - now : 0;
+        if (remaining < delay) delay = static_cast<DWORD>(remaining);
+    }
+    return delay;
+}
+
+bool TryDequeueMessageLocked(ThreadMessageQueue& queue, HWND filterWindow,
+                             UINT minimum, UINT maximum, bool remove, QueuedMessage& message) {
+    UpdateTimersLocked(queue);
+    queue.ChangedMask = 0;
+    for (auto it = queue.Posted.begin(); it != queue.Posted.end(); ++it) {
+        if (MatchesWindowFilter(it->HWnd, filterWindow) && MatchesMessageFilter(it->Message, minimum, maximum)) {
+            message = *it;
+            if (remove) queue.Posted.erase(it);
+            return true;
+        }
+    }
+    if (queue.QuitPending) {
+        message = {nullptr, WM_QUIT, queue.QuitExitCode, 0, GetTickCount()};
+        if (remove) queue.QuitPending = false;
+        return true;
+    }
+    if (MatchesMessageFilter(WM_TIMER, minimum, maximum)) {
+        for (auto& timer : queue.Timers) {
+            if (!timer.Ready || !MatchesWindowFilter(timer.HWnd, filterWindow)) continue;
+            message = {timer.HWnd, WM_TIMER, timer.Id, reinterpret_cast<LPARAM>(timer.Callback), GetTickCount()};
+            if (remove) {
+                timer.Ready = false;
+                timer.Deadline = GetTickCount64() + timer.Elapse;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+LRESULT WINAPI Shim_DefWindowProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+BOOL WINAPI Shim_DestroyWindow(HWND hWnd);
+
+void DestroyChildWindows(HWND parent) {
+    for (;;) {
+        HWND child = nullptr;
+        {
+            ScopedLock lock(g_WindowLock);
+            for (const auto& window : g_Windows) {
+                if (window.Parent == parent && !window.Destroying && window.ThreadId == GetCurrentThreadId()) {
+                    child = window.HWnd;
+                    break;
+                }
+            }
+        }
+        if (!child) return;
+        Shim_DestroyWindow(child);
+    }
+}
+
+bool IsClassAtom(LPCWSTR name) {
+    return (reinterpret_cast<ULONG_PTR>(name) >> 16) == 0;
+}
+
+bool ClassMatches(const WindowClassEntry& entry, LPCWSTR name) {
+    return name && (IsClassAtom(name) ? entry.Atom == LOWORD(reinterpret_cast<ULONG_PTR>(name))
+                                    : EqualsIgnoreCaseWide(entry.ClassName, name));
+}
+
+WindowClassEntry* FindClassLocked(LPCWSTR name, HINSTANCE instance) {
+    for (auto& entry : g_WindowClasses) {
+        if ((entry.Style & CS_GLOBALCLASS) == 0 && entry.HInstance == instance && ClassMatches(entry, name)) return &entry;
+    }
+    for (auto& entry : g_WindowClasses) {
+        if ((entry.Style & CS_GLOBALCLASS) != 0 && ClassMatches(entry, name)) return &entry;
+    }
+    return nullptr;
+}
+
+bool GetSystemClass(LPCWSTR name, WindowClassEntry& entry) {
+    if (!name) return false;
+    const wchar_t* const names[] = {
+        L"Message", L"#32768", L"#32769", L"#32770", L"#32771", L"#32772",
+        L"STATIC", L"BUTTON", L"EDIT", L"COMBOBOX", L"LISTBOX", L"SCROLLBAR", L"MDICLIENT"
+    };
+    std::wstring lookup;
+    if (IsClassAtom(name)) {
+        wchar_t buffer[24]{};
+        swprintf_s(buffer, L"#%u", LOWORD(reinterpret_cast<ULONG_PTR>(name)));
+        lookup = buffer;
+    } else {
+        lookup = name;
+    }
+    for (const auto* systemName : names) {
+        if (EqualsIgnoreCaseWide(lookup, systemName)) {
+            entry.ClassName = systemName;
+            entry.Style = CS_GLOBALCLASS;
+            entry.WndProc = Shim_DefWindowProcW;
+            return true;
+        }
+    }
+    return false;
+}
+
+ATOM RegisterClassCommon(const WNDCLASSEXW& source) {
+    if (!source.lpszClassName || IsClassAtom(source.lpszClassName) || !*source.lpszClassName ||
+        !source.lpfnWndProc || source.cbClsExtra < 0 || source.cbWndExtra < 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    ScopedLock lock(g_WindowLock);
+    bool global = (source.style & CS_GLOBALCLASS) != 0;
+    HINSTANCE instance = source.hInstance ? source.hInstance : GetModuleHandleW(nullptr);
+    ATOM sharedAtom = 0;
+    for (const auto& entry : g_WindowClasses) {
+        if (EqualsIgnoreCaseWide(entry.ClassName, source.lpszClassName)) {
+            sharedAtom = entry.Atom;
+            if (((entry.Style & CS_GLOBALCLASS) != 0) == global && (global || entry.HInstance == instance)) {
+                SetLastError(ERROR_CLASS_ALREADY_EXISTS);
+                return 0;
+            }
+        }
+    }
+    UINT index = sharedAtom ? sharedAtom - 0xC000u : 0;
+    if (!sharedAtom) {
+        for (; index < 0x4000; ++index) {
+            if (!g_ClassAtoms.test((g_NextAtom + index) & 0x3FFFu)) break;
+        }
+        if (index == 0x4000) {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+        index = (g_NextAtom + index) & 0x3FFFu;
+    }
     WindowClassEntry entry;
-    entry.Atom = atom;
-    entry.ClassName = className;
-    entry.Style = style;
-    entry.WndProc = wndProc;
-    entry.ClsExtra = clsExtra;
-    entry.WndExtra = wndExtra;
-    entry.HInstance = hInstance;
-    g_WindowClasses.push_back(entry);
-    LeaveCriticalSection(&g_WindowLock);
-    return atom;
+    entry.Atom = static_cast<ATOM>(0xC000u + index);
+    entry.ClassName = source.lpszClassName;
+    entry.Style = source.style;
+    entry.WndProc = source.lpfnWndProc;
+    entry.ClsExtra = source.cbClsExtra;
+    entry.WndExtra = source.cbWndExtra;
+    entry.HInstance = instance;
+    entry.Icon = source.hIcon;
+    entry.SmallIcon = source.hIconSm;
+    entry.Cursor = source.hCursor;
+    entry.Background = source.hbrBackground;
+    if (source.lpszMenuName && !IsClassAtom(source.lpszMenuName)) entry.MenuName = source.lpszMenuName;
+    else entry.MenuResource = source.lpszMenuName;
+    g_WindowClasses.push_back(std::move(entry));
+    g_ClassAtoms.set(index);
+    if (!sharedAtom) g_NextAtom = (index + 1) & 0x3FFFu;
+    return static_cast<ATOM>(0xC000u + index);
 }
 
-ATOM WINAPI Shim_RegisterClassW(const WNDCLASSW* lpWndClass) {
-    if (!lpWndClass) {
+ATOM WINAPI Shim_RegisterClassW(const WNDCLASSW* source) {
+    if (!source) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-    std::wstring className = ExtractClassName(lpWndClass->lpszClassName);
-    return RegisterClassCommon(
-        className,
-        lpWndClass->style,
-        lpWndClass->lpfnWndProc,
-        lpWndClass->cbClsExtra,
-        lpWndClass->cbWndExtra,
-        lpWndClass->hInstance);
+    WNDCLASSEXW extended{};
+    extended.cbSize = sizeof(extended);
+    extended.style = source->style;
+    extended.lpfnWndProc = source->lpfnWndProc;
+    extended.cbClsExtra = source->cbClsExtra;
+    extended.cbWndExtra = source->cbWndExtra;
+    extended.hInstance = source->hInstance;
+    extended.hIcon = source->hIcon;
+    extended.hCursor = source->hCursor;
+    extended.hbrBackground = source->hbrBackground;
+    extended.lpszMenuName = source->lpszMenuName;
+    extended.lpszClassName = source->lpszClassName;
+    return RegisterClassCommon(extended);
 }
 
-ATOM WINAPI Shim_RegisterClassExW(const WNDCLASSEXW* lpwcx) {
-    if (!lpwcx) {
+ATOM WINAPI Shim_RegisterClassExW(const WNDCLASSEXW* source) {
+    if (!source || source->cbSize != sizeof(WNDCLASSEXW)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-    std::wstring className = ExtractClassName(lpwcx->lpszClassName);
-    return RegisterClassCommon(
-        className,
-        lpwcx->style,
-        lpwcx->lpfnWndProc,
-        lpwcx->cbClsExtra,
-        lpwcx->cbWndExtra,
-        lpwcx->hInstance);
+    return RegisterClassCommon(*source);
 }
 
-BOOL WINAPI Shim_UnregisterClassW(LPCWSTR lpClassName, HINSTANCE hInstance) {
-    (void)hInstance;
-    if (!lpClassName) {
+BOOL WINAPI Shim_UnregisterClassW(LPCWSTR name, HINSTANCE instance) {
+    ScopedLock lock(g_WindowLock);
+    WindowClassEntry* entry = FindClassLocked(name, instance);
+    if (!entry) {
+        SetLastError(ERROR_CLASS_DOES_NOT_EXIST);
         return FALSE;
     }
-    std::wstring className = ExtractClassName(lpClassName);
-    EnterCriticalSection(&g_WindowLock);
-    for (auto it = g_WindowClasses.begin(); it != g_WindowClasses.end(); ++it) {
-        if (EqualsIgnoreCaseWide(it->ClassName, className)) {
-            g_WindowClasses.erase(it);
-            break;
+    ATOM atom = entry->Atom;
+    HINSTANCE classInstance = entry->HInstance;
+    bool global = (entry->Style & CS_GLOBALCLASS) != 0;
+    for (const auto& window : g_Windows) {
+        if (window.ClassAtom == atom && window.ClassInstance == classInstance && window.GlobalClass == global) {
+            SetLastError(ERROR_CLASS_HAS_WINDOWS);
+            return FALSE;
         }
     }
-    LeaveCriticalSection(&g_WindowLock);
+    g_WindowClasses.erase(std::remove_if(g_WindowClasses.begin(), g_WindowClasses.end(),
+        [atom, classInstance, global](const WindowClassEntry& item) {
+            return item.Atom == atom && item.HInstance == classInstance &&
+                ((item.Style & CS_GLOBALCLASS) != 0) == global;
+        }), g_WindowClasses.end());
+    if (std::none_of(g_WindowClasses.begin(), g_WindowClasses.end(),
+        [atom](const WindowClassEntry& item) { return item.Atom == atom; })) g_ClassAtoms.reset(atom - 0xC000u);
     return TRUE;
 }
 
-LRESULT WINAPI Shim_DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
-    (void)hWnd;
-    (void)Msg;
+extern "C" BOOL WINAPI Shim_GetClassInfoExW(HINSTANCE instance, LPCWSTR name, WNDCLASSEXW* output) {
+    if (!output || output->cbSize != sizeof(WNDCLASSEXW)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    ScopedLock lock(g_WindowLock);
+    WindowClassEntry system;
+    WindowClassEntry* entry = FindClassLocked(name, instance);
+    if (!entry && GetSystemClass(name, system)) entry = &system;
+    if (!entry) {
+        SetLastError(ERROR_CLASS_DOES_NOT_EXIST);
+        return FALSE;
+    }
+    output->style = entry->Style;
+    output->lpfnWndProc = entry->WndProc;
+    output->cbClsExtra = entry->ClsExtra;
+    output->cbWndExtra = entry->WndExtra;
+    output->hInstance = entry->HInstance;
+    output->hIcon = entry->Icon;
+    output->hIconSm = entry->SmallIcon;
+    output->hCursor = entry->Cursor;
+    output->hbrBackground = entry->Background;
+    output->lpszMenuName = entry->MenuName.empty() ? entry->MenuResource : entry->MenuName.c_str();
+    output->lpszClassName = name;
+    // Combase reuses the successful query result as a class atom.
+    return entry->Atom ? entry->Atom : TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_GetClassInfoW(HINSTANCE instance, LPCWSTR name, WNDCLASSW* output) {
+    if (!output) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    WNDCLASSEXW extended{};
+    extended.cbSize = sizeof(extended);
+    BOOL atom = Shim_GetClassInfoExW(instance, name, &extended);
+    if (!atom) return FALSE;
+    output->style = extended.style;
+    output->lpfnWndProc = extended.lpfnWndProc;
+    output->cbClsExtra = extended.cbClsExtra;
+    output->cbWndExtra = extended.cbWndExtra;
+    output->hInstance = extended.hInstance;
+    output->hIcon = extended.hIcon;
+    output->hCursor = extended.hCursor;
+    output->hbrBackground = extended.hbrBackground;
+    output->lpszMenuName = extended.lpszMenuName;
+    output->lpszClassName = extended.lpszClassName;
+    return atom;
+}
+
+extern "C" LRESULT WINAPI Shim_CallWindowProcW(WNDPROC previous, HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    return previous ? previous(hWnd, message, wParam, lParam) : 0;
+}
+
+LRESULT WINAPI Shim_DefWindowProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     (void)wParam;
     (void)lParam;
+    if (message == WM_NCCREATE) return TRUE;
+    if (message == WM_CLOSE) Shim_DestroyWindow(hWnd);
     return 0;
 }
 
 HWND WINAPI Shim_CreateWindowExW(
-    DWORD dwExStyle,
-    LPCWSTR lpClassName,
-    LPCWSTR lpWindowName,
-    DWORD dwStyle,
-    int X,
-    int Y,
-    int nWidth,
-    int nHeight,
-    HWND hWndParent,
-    HMENU hMenu,
-    HINSTANCE hInstance,
-    LPVOID lpParam) {
-    (void)X;
-    (void)Y;
-    (void)nWidth;
-    (void)nHeight;
-    (void)lpParam;
-
-    std::wstring className = ExtractClassName(lpClassName);
-    WNDPROC wndProc = Shim_DefWindowProcW;
-    int wndExtra = 0;
-
-    EnterCriticalSection(&g_WindowLock);
-    for (const auto& cls : g_WindowClasses) {
-        if (EqualsIgnoreCaseWide(cls.ClassName, className)) {
-            if (cls.WndProc) {
-                wndProc = cls.WndProc;
+    DWORD exStyle, LPCWSTR className, LPCWSTR windowName, DWORD style, int x, int y, int width, int height,
+    HWND parent, HMENU menu, HINSTANCE instance, LPVOID param) {
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return nullptr;
+    HWND hWnd = nullptr;
+    {
+        ScopedLock lock(g_WindowLock);
+        WindowClassEntry system;
+        WindowClassEntry* cls = nullptr;
+        // Creation with a null instance searches local classes in reverse registration
+        // order. Class queries still require the defining instance.
+        if (!instance) {
+            for (auto it = g_WindowClasses.rbegin(); it != g_WindowClasses.rend(); ++it) {
+                if ((it->Style & CS_GLOBALCLASS) == 0 && ClassMatches(*it, className)) {
+                    cls = &*it;
+                    break;
+                }
             }
-            if (cls.WndExtra > 0) {
-                wndExtra = cls.WndExtra;
-            }
-            break;
         }
+        if (!cls) cls = FindClassLocked(className, instance);
+        if (!cls && GetSystemClass(className, system)) cls = &system;
+        if (!cls) {
+            SetLastError(ERROR_CANNOT_FIND_WND_CLASS);
+            return nullptr;
+        }
+        if (parent && parent != HWND_MESSAGE) {
+            WindowEntry* parentEntry = FindWindowLocked(parent);
+            if (!parentEntry) {
+                SetLastError(kErrorInvalidWindowHandle);
+                return nullptr;
+            }
+            if ((style & WS_CHILD) != 0 && parentEntry->ThreadId != queue->ThreadId) {
+                SetLastError(ERROR_ACCESS_DENIED);
+                return nullptr;
+            }
+        }
+        WindowEntry entry;
+        entry.HWnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(InterlockedIncrement(&g_NextHwnd)));
+        entry.ThreadId = queue->ThreadId;
+        entry.WndProc = cls->WndProc;
+        entry.Style = style;
+        entry.ExStyle = exStyle;
+        entry.Parent = parent;
+        entry.Menu = menu;
+        entry.HInstance = instance;
+        entry.ClassName = cls->ClassName;
+        entry.ClassAtom = cls->Atom;
+        entry.ClassInstance = cls->HInstance;
+        entry.GlobalClass = (cls->Style & CS_GLOBALCLASS) != 0;
+        entry.WindowName = windowName ? windowName : L"";
+        entry.ExtraBytes.resize(static_cast<size_t>(cls->WndExtra), 0);
+        hWnd = entry.HWnd;
+        g_Windows.push_back(std::move(entry));
     }
-
-    DWORD threadId = GetCurrentThreadId();
-    GetOrCreateQueueLocked(threadId);
-    HWND hWnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(InterlockedIncrement(&g_NextHwnd)));
-
-    WindowEntry entry;
-    entry.HWnd = hWnd;
-    entry.ThreadId = threadId;
-    entry.WndProc = wndProc;
-    entry.Style = dwStyle;
-    entry.ExStyle = dwExStyle;
-    entry.Parent = hWndParent;
-    entry.Menu = hMenu;
-    entry.HInstance = hInstance;
-    entry.UserData = 0;
-    entry.ClassName = className;
-    entry.WindowName = lpWindowName ? std::wstring(lpWindowName) : L"";
-    int allocExtra = wndExtra > 64 ? wndExtra : 64;
-    entry.ExtraBytes.resize(static_cast<size_t>(allocExtra), 0);
-    g_Windows.push_back(entry);
-    LeaveCriticalSection(&g_WindowLock);
-
-    return hWnd;
+    CREATESTRUCTW creation{};
+    creation.lpCreateParams = param;
+    creation.hInstance = instance;
+    creation.hMenu = menu;
+    creation.hwndParent = parent;
+    creation.cy = height;
+    creation.cx = width;
+    creation.y = y;
+    creation.x = x;
+    creation.style = static_cast<LONG>(style);
+    creation.lpszName = windowName;
+    creation.lpszClass = className;
+    creation.dwExStyle = exStyle;
+    if (!InvokeWindowProc(hWnd, WM_NCCREATE, 0, reinterpret_cast<LPARAM>(&creation))) {
+        {
+            ScopedLock lock(g_WindowLock);
+            WindowEntry* entry = FindWindowLocked(hWnd);
+            if (entry) entry->Destroying = true;
+        }
+        DestroyChildWindows(hWnd);
+        InvokeWindowProc(hWnd, WM_NCDESTROY, 0, 0);
+        ScopedLock lock(g_WindowLock);
+        RemoveWindowLocked(hWnd);
+        return nullptr;
+    }
+    if (!GetWndProcForWindow(hWnd)) return nullptr;
+    if (InvokeWindowProc(hWnd, WM_CREATE, 0, reinterpret_cast<LPARAM>(&creation)) == -1) {
+        Shim_DestroyWindow(hWnd);
+        return nullptr;
+    }
+    return GetWndProcForWindow(hWnd) ? hWnd : nullptr;
 }
 
 BOOL WINAPI Shim_DestroyWindow(HWND hWnd) {
-    EnterCriticalSection(&g_WindowLock);
-    for (auto it = g_Windows.begin(); it != g_Windows.end(); ++it) {
-        if (it->HWnd == hWnd) {
-            g_Windows.erase(it);
-            LeaveCriticalSection(&g_WindowLock);
-            return TRUE;
-        }
-    }
-    LeaveCriticalSection(&g_WindowLock);
-    SetLastError(kErrorInvalidWindowHandle);
-    return FALSE;
-}
-
-BOOL WINAPI Shim_IsWindow(HWND hWnd) {
-    if (!hWnd) {
-        return FALSE;
-    }
-    EnterCriticalSection(&g_WindowLock);
-    bool exists = FindWindowLocked(hWnd) != nullptr;
-    LeaveCriticalSection(&g_WindowLock);
-    return exists ? TRUE : FALSE;
-}
-
-BOOL WINAPI Shim_IsChild(HWND hWndParent, HWND hWnd) {
-    if (!hWndParent || !hWnd) {
-        return FALSE;
-    }
-    EnterCriticalSection(&g_WindowLock);
-    WindowEntry* entry = FindWindowLocked(hWnd);
-    bool isChild = entry && entry->Parent == hWndParent;
-    LeaveCriticalSection(&g_WindowLock);
-    return isChild ? TRUE : FALSE;
-}
-
-LONG_PTR WINAPI Shim_GetWindowLongPtrW(HWND hWnd, int nIndex) {
-    EnterCriticalSection(&g_WindowLock);
-    WindowEntry* entry = FindWindowLocked(hWnd);
-    if (!entry) {
-        LeaveCriticalSection(&g_WindowLock);
-        SetLastError(kErrorInvalidWindowHandle);
-        return 0;
-    }
-    LONG_PTR ret = 0;
-    switch (nIndex) {
-        case kGwlpWndProc:
-            ret = reinterpret_cast<LONG_PTR>(entry->WndProc);
-            break;
-        case kGwlpHInstance:
-            ret = reinterpret_cast<LONG_PTR>(entry->HInstance);
-            break;
-        case kGwlpHwndParent:
-            ret = reinterpret_cast<LONG_PTR>(entry->Parent);
-            break;
-        case kGwlpId:
-            ret = reinterpret_cast<LONG_PTR>(entry->Menu);
-            break;
-        case kGwlStyle:
-            ret = static_cast<LONG_PTR>(entry->Style);
-            break;
-        case kGwlExStyle:
-            ret = static_cast<LONG_PTR>(entry->ExStyle);
-            break;
-        case kGwlpUserData:
-            ret = entry->UserData;
-            break;
-        default:
-            if (nIndex >= 0 && static_cast<size_t>(nIndex) + sizeof(LONG_PTR) <= entry->ExtraBytes.size()) {
-                ret = *reinterpret_cast<LONG_PTR*>(&entry->ExtraBytes[static_cast<size_t>(nIndex)]);
-            }
-            break;
-    }
-    LeaveCriticalSection(&g_WindowLock);
-    return ret;
-}
-
-LONG_PTR WINAPI Shim_SetWindowLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) {
-    EnterCriticalSection(&g_WindowLock);
-    WindowEntry* entry = FindWindowLocked(hWnd);
-    if (!entry) {
-        LeaveCriticalSection(&g_WindowLock);
-        SetLastError(kErrorInvalidWindowHandle);
-        return 0;
-    }
-    LONG_PTR prev = 0;
-    switch (nIndex) {
-        case kGwlpWndProc:
-            prev = reinterpret_cast<LONG_PTR>(entry->WndProc);
-            entry->WndProc = reinterpret_cast<WNDPROC>(dwNewLong);
-            break;
-        case kGwlpHInstance:
-            prev = reinterpret_cast<LONG_PTR>(entry->HInstance);
-            entry->HInstance = reinterpret_cast<HINSTANCE>(dwNewLong);
-            break;
-        case kGwlpHwndParent:
-            prev = reinterpret_cast<LONG_PTR>(entry->Parent);
-            entry->Parent = reinterpret_cast<HWND>(dwNewLong);
-            break;
-        case kGwlpId:
-            prev = reinterpret_cast<LONG_PTR>(entry->Menu);
-            entry->Menu = reinterpret_cast<HMENU>(dwNewLong);
-            break;
-        case kGwlStyle:
-            prev = static_cast<LONG_PTR>(entry->Style);
-            entry->Style = static_cast<DWORD>(dwNewLong);
-            break;
-        case kGwlExStyle:
-            prev = static_cast<LONG_PTR>(entry->ExStyle);
-            entry->ExStyle = static_cast<DWORD>(dwNewLong);
-            break;
-        case kGwlpUserData:
-            prev = entry->UserData;
-            entry->UserData = dwNewLong;
-            break;
-        default:
-            if (nIndex >= 0) {
-                size_t needed = static_cast<size_t>(nIndex) + sizeof(LONG_PTR);
-                if (entry->ExtraBytes.size() < needed) {
-                    entry->ExtraBytes.resize(needed, 0);
-                }
-                prev = *reinterpret_cast<LONG_PTR*>(&entry->ExtraBytes[static_cast<size_t>(nIndex)]);
-                *reinterpret_cast<LONG_PTR*>(&entry->ExtraBytes[static_cast<size_t>(nIndex)]) = dwNewLong;
-            }
-            break;
-    }
-    LeaveCriticalSection(&g_WindowLock);
-    return prev;
-}
-
-LONG WINAPI Shim_GetWindowLongW(HWND hWnd, int nIndex) {
-    return static_cast<LONG>(Shim_GetWindowLongPtrW(hWnd, nIndex));
-}
-
-LONG WINAPI Shim_SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong) {
-    return static_cast<LONG>(Shim_SetWindowLongPtrW(hWnd, nIndex, static_cast<LONG_PTR>(dwNewLong)));
-}
-
-DWORD WINAPI Shim_GetWindowThreadProcessId(HWND hWnd, LPDWORD lpdwProcessId) {
-    if (lpdwProcessId) {
-        *lpdwProcessId = GetCurrentProcessId();
-    }
-    if (!hWnd) {
-        return 0;
-    }
-    EnterCriticalSection(&g_WindowLock);
-    WindowEntry* entry = FindWindowLocked(hWnd);
-    DWORD tid = entry ? entry->ThreadId : 0;
-    LeaveCriticalSection(&g_WindowLock);
-    if (!tid) {
-        SetLastError(kErrorInvalidWindowHandle);
-    }
-    return tid;
-}
-
-void WriteMsgStruct(LPMSG lpMsg, const QueuedMessage& msg) {
-    if (!lpMsg) {
-        return;
-    }
-    lpMsg->hwnd = msg.HWnd;
-    lpMsg->message = msg.Message;
-    lpMsg->wParam = msg.WParam;
-    lpMsg->lParam = msg.LParam;
-    lpMsg->time = msg.Time;
-    lpMsg->pt.x = 0;
-    lpMsg->pt.y = 0;
-}
-
-BOOL WINAPI Shim_PeekMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg) {
-    ThreadMessageQueue* queue = GetOrCreateQueue(GetCurrentThreadId());
-    ProcessSentMessages(queue);
-    bool remove = (wRemoveMsg & 0x0001u) != 0;
-    QueuedMessage msg;
-    if (!TryDequeueMessage(queue, hWnd, wMsgFilterMin, wMsgFilterMax, remove, &msg)) {
-        return FALSE;
-    }
-    WriteMsgStruct(lpMsg, msg);
-    return TRUE;
-}
-
-BOOL WINAPI Shim_GetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax) {
-    ThreadMessageQueue* queue = GetOrCreateQueue(GetCurrentThreadId());
-    while (true) {
-        ProcessSentMessages(queue);
-        QueuedMessage msg;
-        if (TryDequeueMessage(queue, hWnd, wMsgFilterMin, wMsgFilterMax, true, &msg)) {
-            WriteMsgStruct(lpMsg, msg);
-            return msg.Message == kWmQuit ? FALSE : TRUE;
-        }
-        InterlockedIncrement(&queue->WaitingCount);
-        WaitForSingleObject(queue->WakeEvent, 50);
-        InterlockedDecrement(&queue->WaitingCount);
-    }
-}
-
-BOOL WINAPI Shim_TranslateMessage(const MSG* lpMsg) {
-    (void)lpMsg;
-    return FALSE;
-}
-
-LRESULT WINAPI Shim_DispatchMessageW(const MSG* lpMsg) {
-    if (!lpMsg) {
-        return 0;
-    }
-    if (lpMsg->message == kWmTimer && lpMsg->lParam != 0) {
-        auto timerProc = reinterpret_cast<TIMERPROC>(lpMsg->lParam);
-        timerProc(lpMsg->hwnd, kWmTimer, static_cast<UINT_PTR>(lpMsg->wParam), GetTickCount());
-        return 0;
-    }
-    if (!lpMsg->hwnd) {
-        return 0;
-    }
-    return InvokeWindowProc(lpMsg->hwnd, lpMsg->message, lpMsg->wParam, lpMsg->lParam);
-}
-
-BOOL WINAPI Shim_PostMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
-    DWORD targetThreadId = 0;
-    EnterCriticalSection(&g_WindowLock);
-    if (!hWnd) {
-        targetThreadId = GetCurrentThreadId();
-    } else {
+    {
+        ScopedLock lock(g_WindowLock);
         WindowEntry* entry = FindWindowLocked(hWnd);
         if (!entry) {
-            LeaveCriticalSection(&g_WindowLock);
             SetLastError(kErrorInvalidWindowHandle);
             return FALSE;
         }
-        targetThreadId = entry->ThreadId;
+        if (entry->ThreadId != GetCurrentThreadId()) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+        if (entry->Destroying) return TRUE;
+        entry->Destroying = true;
     }
-    ThreadMessageQueue* queue = GetOrCreateQueueLocked(targetThreadId);
-    QueuedMessage qm{hWnd, Msg, wParam, lParam, GetTickCount()};
-    queue->Posted.push_back(qm);
-    SetEvent(queue->WakeEvent);
-    LeaveCriticalSection(&g_WindowLock);
+    InvokeWindowProc(hWnd, WM_DESTROY, 0, 0);
+    DestroyChildWindows(hWnd);
+    InvokeWindowProc(hWnd, WM_NCDESTROY, 0, 0);
+    ScopedLock lock(g_WindowLock);
+    RemoveWindowLocked(hWnd);
     return TRUE;
 }
 
-BOOL WINAPI Shim_PostThreadMessageW(DWORD idThread, UINT Msg, WPARAM wParam, LPARAM lParam) {
-    EnterCriticalSection(&g_WindowLock);
-    ThreadMessageQueue* queue = GetOrCreateQueueLocked(idThread);
-    QueuedMessage qm{nullptr, Msg, wParam, lParam, GetTickCount()};
-    queue->Posted.push_back(qm);
-    SetEvent(queue->WakeEvent);
-    LeaveCriticalSection(&g_WindowLock);
-    return TRUE;
+BOOL WINAPI Shim_IsWindow(HWND hWnd) {
+    ScopedLock lock(g_WindowLock);
+    return FindWindowLocked(hWnd) ? TRUE : FALSE;
 }
 
-void WINAPI Shim_PostQuitMessage(int nExitCode) {
-    Shim_PostThreadMessageW(GetCurrentThreadId(), kWmQuit, static_cast<WPARAM>(nExitCode), 0);
+BOOL WINAPI Shim_IsChild(HWND parent, HWND child) {
+    ScopedLock lock(g_WindowLock);
+    return IsChildLocked(parent, child) ? TRUE : FALSE;
 }
 
-LRESULT WINAPI Shim_SendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
-    EnterCriticalSection(&g_WindowLock);
+template<typename T>
+T WindowLongCommon(HWND hWnd, int index, bool write, T value = 0) {
+    ScopedLock lock(g_WindowLock);
     WindowEntry* entry = FindWindowLocked(hWnd);
     if (!entry) {
-        LeaveCriticalSection(&g_WindowLock);
         SetLastError(kErrorInvalidWindowHandle);
         return 0;
     }
-    DWORD targetThreadId = entry->ThreadId;
-    LeaveCriticalSection(&g_WindowLock);
-
-    DWORD currentThreadId = GetCurrentThreadId();
-    if (targetThreadId == currentThreadId) {
-        return InvokeWindowProc(hWnd, Msg, wParam, lParam);
+    if (index >= 0) {
+        size_t offset = static_cast<size_t>(index);
+        if (offset > entry->ExtraBytes.size() || sizeof(T) > entry->ExtraBytes.size() - offset) {
+            SetLastError(ERROR_INVALID_INDEX);
+            return 0;
+        }
+        T previous = 0;
+        memcpy(&previous, entry->ExtraBytes.data() + offset, sizeof(T));
+        if (write) memcpy(entry->ExtraBytes.data() + offset, &value, sizeof(T));
+        return previous;
     }
-
-    ThreadMessageQueue* targetQueue = GetOrCreateQueue(targetThreadId);
-    ThreadMessageQueue* currentQueue = GetOrCreateQueue(currentThreadId);
-
-    SentMessageItem item;
-    item.HWnd = hWnd;
-    item.Message = Msg;
-    item.WParam = wParam;
-    item.LParam = lParam;
-    item.Result = 0;
-    item.DoneEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-
-    EnterCriticalSection(&g_WindowLock);
-    targetQueue->Sent.push_back(&item);
-    SetEvent(targetQueue->WakeEvent);
-    LONG waiting = targetQueue->WaitingCount;
-    LeaveCriticalSection(&g_WindowLock);
-
-    DWORD timeoutMs = waiting > 0 ? 500 : 25;
-    DWORD elapsed = 0;
-    bool completed = false;
-    while (elapsed < timeoutMs) {
-        ProcessSentMessages(currentQueue);
-        if (WaitForSingleObject(item.DoneEvent, 5) == WAIT_OBJECT_0) {
-            completed = true;
+    LONG_PTR previous = 0;
+    switch (index) {
+        case kGwlpWndProc:
+            previous = reinterpret_cast<LONG_PTR>(entry->WndProc);
+            if (write) entry->WndProc = reinterpret_cast<WNDPROC>(static_cast<LONG_PTR>(value));
             break;
-        }
-        elapsed += 5;
+        case kGwlpHInstance:
+            previous = reinterpret_cast<LONG_PTR>(entry->HInstance);
+            if (write) entry->HInstance = reinterpret_cast<HINSTANCE>(static_cast<LONG_PTR>(value));
+            break;
+        case kGwlpHwndParent:
+            previous = reinterpret_cast<LONG_PTR>(entry->Parent);
+            if (write) entry->Parent = reinterpret_cast<HWND>(static_cast<LONG_PTR>(value));
+            break;
+        case kGwlpId:
+            previous = reinterpret_cast<LONG_PTR>(entry->Menu);
+            if (write) entry->Menu = reinterpret_cast<HMENU>(static_cast<LONG_PTR>(value));
+            break;
+        case kGwlStyle:
+            previous = entry->Style;
+            if (write) entry->Style = static_cast<DWORD>(value);
+            break;
+        case kGwlExStyle:
+            previous = entry->ExStyle;
+            if (write) entry->ExStyle = static_cast<DWORD>(value);
+            break;
+        case kGwlpUserData:
+            previous = entry->UserData;
+            if (write) entry->UserData = static_cast<LONG_PTR>(value);
+            break;
+        default:
+            SetLastError(ERROR_INVALID_INDEX);
+            return 0;
     }
+    return static_cast<T>(previous);
+}
 
-    if (!completed) {
-        EnterCriticalSection(&g_WindowLock);
-        for (auto it = targetQueue->Sent.begin(); it != targetQueue->Sent.end(); ++it) {
-            if (*it == &item) {
-                targetQueue->Sent.erase(it);
-                break;
+LONG_PTR WINAPI Shim_GetWindowLongPtrW(HWND hWnd, int index) {
+    return WindowLongCommon<LONG_PTR>(hWnd, index, false);
+}
+
+LONG_PTR WINAPI Shim_SetWindowLongPtrW(HWND hWnd, int index, LONG_PTR value) {
+    return WindowLongCommon<LONG_PTR>(hWnd, index, true, value);
+}
+
+LONG WINAPI Shim_GetWindowLongW(HWND hWnd, int index) {
+    return WindowLongCommon<LONG>(hWnd, index, false);
+}
+
+LONG WINAPI Shim_SetWindowLongW(HWND hWnd, int index, LONG value) {
+    return WindowLongCommon<LONG>(hWnd, index, true, value);
+}
+
+DWORD WINAPI Shim_GetWindowThreadProcessId(HWND hWnd, LPDWORD processId) {
+    ScopedLock lock(g_WindowLock);
+    WindowEntry* entry = FindWindowLocked(hWnd);
+    if (!entry) {
+        SetLastError(kErrorInvalidWindowHandle);
+        return 0;
+    }
+    if (processId) *processId = GetCurrentProcessId();
+    return entry->ThreadId;
+}
+
+void WriteMsgStruct(LPMSG output, const QueuedMessage& message) {
+    *output = {};
+    output->hwnd = message.HWnd;
+    output->message = message.Message;
+    output->wParam = message.WParam;
+    output->lParam = message.LParam;
+    output->time = message.Time;
+}
+
+bool ValidateMessageArguments(LPMSG output, HWND filterWindow, UINT minimum, UINT maximum) {
+    if (!output || ((minimum != 0 || maximum != 0) && minimum > maximum)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    if (filterWindow && filterWindow != reinterpret_cast<HWND>(static_cast<LONG_PTR>(-1))) {
+        ScopedLock lock(g_WindowLock);
+        if (!FindWindowLocked(filterWindow)) {
+            SetLastError(kErrorInvalidWindowHandle);
+            return false;
+        }
+    }
+    return true;
+}
+
+BOOL WINAPI Shim_PeekMessageW(LPMSG output, HWND filterWindow, UINT minimum, UINT maximum, UINT removeFlags) {
+    if (!ValidateMessageArguments(output, filterWindow, minimum, maximum)) return FALSE;
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return FALSE;
+    ProcessSentMessages(queue);
+    QueuedMessage message;
+    ScopedLock lock(g_WindowLock);
+    if (!TryDequeueMessageLocked(*queue, filterWindow, minimum, maximum, (removeFlags & PM_REMOVE) != 0, message)) return FALSE;
+    WriteMsgStruct(output, message);
+    return TRUE;
+}
+
+BOOL WINAPI Shim_GetMessageW(LPMSG output, HWND filterWindow, UINT minimum, UINT maximum) {
+    if (!ValidateMessageArguments(output, filterWindow, minimum, maximum)) return -1;
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return -1;
+    for (;;) {
+        ProcessSentMessages(queue);
+        ULONGLONG observed = 0;
+        {
+            ScopedLock lock(g_WindowLock);
+            QueuedMessage message;
+            if (TryDequeueMessageLocked(*queue, filterWindow, minimum, maximum, true, message)) {
+                WriteMsgStruct(output, message);
+                return message.Message == WM_QUIT ? FALSE : TRUE;
             }
+            observed = queue->ChangeCounter;
         }
-        LeaveCriticalSection(&g_WindowLock);
-        if (WaitForSingleObject(item.DoneEvent, 0) != WAIT_OBJECT_0) {
-            item.Result = InvokeWindowProc(hWnd, Msg, wParam, lParam);
+        DWORD delay = INFINITE;
+        {
+            ScopedLock lock(g_WindowLock);
+            if (queue->ChangeCounter != observed || HasPendingSendsLocked(*queue)) continue;
+            ResetEvent(queue->WakeEvent);
+            delay = NextTimerDelayLocked(*queue, filterWindow, minimum, maximum);
+        }
+        if (WaitForSingleObject(queue->WakeEvent, delay) == WAIT_FAILED) return -1;
+    }
+}
+
+BOOL WINAPI Shim_TranslateMessage(const MSG* message) {
+    (void)message;
+    return FALSE;
+}
+
+LRESULT WINAPI Shim_DispatchMessageW(const MSG* message) {
+    if (!message) return 0;
+    if (message->message == WM_TIMER && message->lParam != 0) {
+        auto callback = reinterpret_cast<TIMERPROC>(message->lParam);
+        callback(message->hwnd, WM_TIMER, static_cast<UINT_PTR>(message->wParam), GetTickCount());
+        return 0;
+    }
+    return InvokeWindowProc(message->hwnd, message->message, message->wParam, message->lParam);
+}
+
+void PostToQueueLocked(ThreadMessageQueue& queue, HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_QUIT) {
+        queue.QuitPending = true;
+        queue.QuitExitCode = wParam;
+    } else {
+        queue.Posted.push_back({hWnd, message, wParam, lParam, GetTickCount()});
+    }
+    QueueChangedLocked(queue, MessageCategory(message));
+}
+
+BOOL WINAPI Shim_PostMessageW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (!hWnd && !GetCurrentThreadQueue()) return FALSE;
+    ScopedLock lock(g_WindowLock);
+    DWORD targetId = GetCurrentThreadId();
+    if (hWnd) {
+        WindowEntry* window = FindWindowLocked(hWnd);
+        if (!window) {
+            SetLastError(kErrorInvalidWindowHandle);
+            return FALSE;
+        }
+        targetId = window->ThreadId;
+    }
+    auto queue = FindQueueLocked(targetId);
+    if (!queue) {
+        SetLastError(ERROR_INVALID_THREAD_ID);
+        return FALSE;
+    }
+    PostToQueueLocked(*queue, hWnd, message, wParam, lParam);
+    return TRUE;
+}
+
+BOOL WINAPI Shim_PostThreadMessageW(DWORD threadId, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (threadId == GetCurrentThreadId() && !GetCurrentThreadQueue()) return FALSE;
+    ScopedLock lock(g_WindowLock);
+    auto queue = FindQueueLocked(threadId);
+    if (!queue) {
+        SetLastError(ERROR_INVALID_THREAD_ID);
+        return FALSE;
+    }
+    PostToQueueLocked(*queue, nullptr, message, wParam, lParam);
+    return TRUE;
+}
+
+void WINAPI Shim_PostQuitMessage(int exitCode) {
+    Shim_PostThreadMessageW(GetCurrentThreadId(), WM_QUIT, static_cast<WPARAM>(exitCode), 0);
+}
+
+LRESULT WINAPI Shim_SendMessageW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto current = GetCurrentThreadQueue();
+    if (!current) return 0;
+    auto item = std::make_shared<SentMessageItem>();
+    item->HWnd = hWnd;
+    item->Message = message;
+    item->WParam = wParam;
+    item->LParam = lParam;
+    std::shared_ptr<ThreadMessageQueue> target;
+    bool sameThread = false;
+    {
+        ScopedLock lock(g_WindowLock);
+        WindowEntry* window = FindWindowLocked(hWnd);
+        if (!window) {
+            SetLastError(kErrorInvalidWindowHandle);
+            return 0;
+        }
+        sameThread = window->ThreadId == current->ThreadId;
+        if (!sameThread) {
+            target = FindQueueLocked(window->ThreadId);
+            if (!target) {
+                SetLastError(ERROR_INVALID_THREAD_ID);
+                return 0;
+            }
+            item->DoneEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            if (!item->DoneEvent) return 0;
+            target->Sent.push_back(item);
+            QueueChangedLocked(*target, QS_SENDMESSAGE);
         }
     }
-
-    CloseHandle(item.DoneEvent);
-    return item.Result;
+    if (sameThread) return InvokeWindowProc(hWnd, message, wParam, lParam);
+    HANDLE handles[] = {item->DoneEvent, current->WakeEvent};
+    for (;;) {
+        ProcessSentMessages(current);
+        {
+            ScopedLock lock(g_WindowLock);
+            if (item->State == SendState::Completed || item->State == SendState::Cancelled) {
+                if (item->Error) SetLastError(item->Error);
+                return item->Result;
+            }
+            if (HasPendingSendsLocked(*current)) continue;
+            ResetEvent(current->WakeEvent);
+        }
+        // No timeout: the receiver may still be using data in the sender's frame.
+        WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+    }
 }
 
 DWORD WINAPI Shim_GetQueueStatus(UINT flags) {
-    (void)flags;
-    ThreadMessageQueue* queue = GetOrCreateQueue(GetCurrentThreadId());
-    return QueueHasMessages(queue) ? 0x00FF00FFu : 0u;
+    if ((flags & ~kAllQueueBits) != 0) {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return 0;
+    }
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return 0;
+    ScopedLock lock(g_WindowLock);
+    UpdateTimersLocked(*queue);
+    UINT changed = queue->ChangedMask & flags;
+    UINT current = CurrentQueueBitsLocked(*queue) & flags;
+    queue->ChangedMask &= ~flags;
+    return MAKELONG(changed, current);
 }
 
-DWORD WINAPI Shim_InSendMessageEx(LPVOID lpReserved) {
-    (void)lpReserved;
-    ThreadMessageQueue* queue = GetOrCreateQueue(GetCurrentThreadId());
-    return InterlockedCompareExchange(&queue->InSendMessageDepth, 0, 0) > 0 ? 1u : 0u;
+DWORD WINAPI Shim_InSendMessageEx(LPVOID reserved) {
+    (void)reserved;
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return 0;
+    ScopedLock lock(g_WindowLock);
+    return queue->InSendMessageDepth > 0 ? ISMEX_SEND : ISMEX_NOSEND;
 }
 
-BOOL WINAPI Shim_IsGUIThread(BOOL bConvert) {
-    (void)bConvert;
-    GetOrCreateQueue(GetCurrentThreadId());
+BOOL WINAPI Shim_IsGUIThread(BOOL convert) {
+    EnsureLocksInitialized();
+    if (convert) return GetCurrentThreadQueue() ? TRUE : FALSE;
+    return g_QueueFls != FLS_OUT_OF_INDEXES && FlsGetValue(g_QueueFls) ? TRUE : FALSE;
+}
+
+BOOL WINAPI Shim_AllowSetForegroundWindow(DWORD processId) {
+    (void)processId;
     return TRUE;
 }
 
-BOOL WINAPI Shim_AllowSetForegroundWindow(DWORD dwProcessId) {
-    (void)dwProcessId;
-    return TRUE;
-}
-
-UINT_PTR WINAPI Shim_SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse, TIMERPROC lpTimerFunc) {
-    (void)hWnd;
-    (void)uElapse;
-    (void)lpTimerFunc;
-    if (nIDEvent != 0) {
-        return nIDEvent;
+UINT_PTR WINAPI Shim_SetTimer(HWND hWnd, UINT_PTR timerId, UINT elapse, TIMERPROC callback) {
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return 0;
+    ScopedLock lock(g_WindowLock);
+    if (hWnd) {
+        WindowEntry* window = FindWindowLocked(hWnd);
+        if (!window) {
+            SetLastError(kErrorInvalidWindowHandle);
+            return 0;
+        }
+        if (window->ThreadId != queue->ThreadId) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return 0;
+        }
     }
-    return static_cast<UINT_PTR>(InterlockedIncrement(&g_NextTimerId));
-}
-
-UINT_PTR WINAPI Shim_SetCoalescableTimer(
-    HWND hWnd,
-    UINT_PTR nIDEvent,
-    UINT uElapse,
-    TIMERPROC lpTimerFunc,
-    ULONG uToleranceDelay) {
-    (void)uToleranceDelay;
-    return Shim_SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc);
-}
-
-BOOL WINAPI Shim_KillTimer(HWND hWnd, UINT_PTR uIDEvent) {
-    (void)hWnd;
-    (void)uIDEvent;
-    return TRUE;
-}
-
-DWORD WINAPI Shim_MsgWaitForMultipleObjectsEx(
-    DWORD nCount,
-    const HANDLE* pHandles,
-    DWORD dwMilliseconds,
-    DWORD dwWakeMask,
-    DWORD dwFlags) {
-    (void)dwWakeMask;
-    ThreadMessageQueue* queue = GetOrCreateQueue(GetCurrentThreadId());
-    ProcessSentMessages(queue);
-    if (QueueHasMessages(queue)) {
-        return nCount;
+    elapse = (std::max)(10u, (std::min)(elapse, 0x7FFFFFFFu));
+    for (auto& timer : queue->Timers) {
+        if (timer.HWnd == hWnd && timer.Id == timerId && timerId != 0) {
+            timer.Elapse = elapse;
+            timer.Callback = callback;
+            timer.Deadline = GetTickCount64() + elapse;
+            timer.Ready = false;
+            QueueChangedLocked(*queue);
+            return timer.Id;
+        }
     }
-
-    HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {};
-    DWORD copyCount = nCount < (MAXIMUM_WAIT_OBJECTS - 1) ? nCount : (MAXIMUM_WAIT_OBJECTS - 1);
-    for (DWORD i = 0; i < copyCount; ++i) {
-        handles[i] = pHandles[i];
+    if (!timerId || !hWnd) {
+        do {
+            timerId = static_cast<UINT_PTR>(static_cast<ULONG>(InterlockedIncrement(&g_NextTimerId)));
+        } while (!timerId || std::any_of(queue->Timers.begin(), queue->Timers.end(),
+            [timerId](const TimerEntry& timer) { return timer.Id == timerId; }));
     }
-    handles[copyCount] = queue->WakeEvent;
+    queue->Timers.push_back({hWnd, timerId, elapse, callback, GetTickCount64() + elapse, false});
+    QueueChangedLocked(*queue);
+    return timerId;
+}
 
-    BOOL waitAll = (dwFlags & 0x0001u) != 0 ? TRUE : FALSE;
-    BOOL alertable = (dwFlags & 0x0002u) != 0 ? TRUE : FALSE;
+UINT_PTR WINAPI Shim_SetCoalescableTimer(HWND hWnd, UINT_PTR timerId, UINT elapse, TIMERPROC callback, ULONG tolerance) {
+    (void)tolerance;
+    return Shim_SetTimer(hWnd, timerId, elapse, callback);
+}
 
-    InterlockedIncrement(&queue->WaitingCount);
-    DWORD res = WaitForMultipleObjectsEx(copyCount + 1, handles, waitAll, dwMilliseconds, alertable);
-    InterlockedDecrement(&queue->WaitingCount);
+BOOL WINAPI Shim_KillTimer(HWND hWnd, UINT_PTR timerId) {
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return FALSE;
+    ScopedLock lock(g_WindowLock);
+    if (hWnd && !FindWindowLocked(hWnd)) {
+        SetLastError(kErrorInvalidWindowHandle);
+        return FALSE;
+    }
+    for (auto it = queue->Timers.begin(); it != queue->Timers.end(); ++it) {
+        if (it->HWnd == hWnd && it->Id == timerId) {
+            queue->Timers.erase(it);
+            QueueChangedLocked(*queue);
+            return TRUE;
+        }
+    }
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+}
 
-    ProcessSentMessages(queue);
-    return res;
+DWORD WINAPI Shim_MsgWaitForMultipleObjectsEx(DWORD count, const HANDLE* inputHandles,
+                                             DWORD milliseconds, DWORD wakeMask, DWORD flags) {
+    if (count > MAXIMUM_WAIT_OBJECTS - 1 || (count && !inputHandles) || (flags & ~0x0007u) != 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+    auto queue = GetCurrentThreadQueue();
+    if (!queue) return WAIT_FAILED;
+    HANDLE handles[MAXIMUM_WAIT_OBJECTS]{};
+    for (DWORD i = 0; i < count; ++i) handles[i] = inputHandles[i];
+    handles[count] = queue->WakeEvent;
+    bool waitAll = (flags & MWMO_WAITALL) != 0;
+    bool inputAvailable = (flags & MWMO_INPUTAVAILABLE) != 0;
+    BOOL alertable = (flags & MWMO_ALERTABLE) != 0;
+    ULONGLONG started = GetTickCount64();
+    bool observedInput = false;
+    for (;;) {
+        {
+            ScopedLock lock(g_WindowLock);
+            UpdateTimersLocked(*queue);
+            UINT status = inputAvailable ? CurrentQueueBitsLocked(*queue) : queue->ChangedMask;
+            observedInput = observedInput || (status & wakeMask) != 0;
+            queue->ChangedMask &= ~wakeMask;
+        }
+        ProcessSentMessages(queue);
+        DWORD timerDelay = INFINITE;
+        {
+            ScopedLock lock(g_WindowLock);
+            UpdateTimersLocked(*queue);
+            UINT status = inputAvailable ? CurrentQueueBitsLocked(*queue) : queue->ChangedMask;
+            observedInput = observedInput || (status & wakeMask) != 0;
+            queue->ChangedMask &= ~wakeMask;
+            if (HasPendingSendsLocked(*queue)) continue;
+            ResetEvent(queue->WakeEvent);
+            if ((wakeMask & QS_TIMER) != 0) timerDelay = NextTimerDelayLocked(*queue);
+        }
+        if (observedInput && (!waitAll || count == 0)) {
+            if (count) {
+                DWORD result = WaitForMultipleObjectsEx(count, handles, FALSE, 0, alertable);
+                if (result != WAIT_TIMEOUT) return result;
+            }
+            return WAIT_OBJECT_0 + count;
+        }
+        ULONGLONG elapsed = GetTickCount64() - started;
+        DWORD remaining = milliseconds == INFINITE ? INFINITE :
+            (elapsed >= milliseconds ? 0 : milliseconds - static_cast<DWORD>(elapsed));
+        DWORD delay = (std::min)(remaining, timerDelay);
+        DWORD result = WAIT_TIMEOUT;
+        if (waitAll && count > 0 && observedInput) {
+            // Check all handles atomically, without consuming auto-reset handles individually.
+            // Short bounded waits let this thread continue servicing incoming synchronous sends.
+            result = WaitForMultipleObjectsEx(count, handles, TRUE, (std::min)(delay, DWORD{20}), alertable);
+        } else if (waitAll && count > 0) {
+            result = WaitForSingleObjectEx(queue->WakeEvent, delay, alertable);
+            if (result == WAIT_OBJECT_0) continue;
+        } else {
+            result = WaitForMultipleObjectsEx(count + 1, handles, FALSE, delay, alertable);
+            if (result == WAIT_OBJECT_0 + count) continue;
+            if (result != WAIT_TIMEOUT) return result;
+        }
+        if (result != WAIT_TIMEOUT) return result;
+        if (milliseconds != INFINITE && GetTickCount64() - started >= milliseconds) return WAIT_TIMEOUT;
+    }
 }
 
 BOOL WINAPI Shim_IsThreadMessageQueueAttached() {
-    return TRUE;
+    return Shim_IsGUIThread(FALSE);
 }
 
 BOOL WINAPI Shim_SetThreadInputBlocked(BOOL blocked) {
@@ -997,89 +1402,80 @@ HANDLE WINAPI Shim_GetProcessWindowStation() {
     return kFakeWinSta;
 }
 
-HANDLE WINAPI Shim_GetThreadDesktop(DWORD dwThreadId) {
-    (void)dwThreadId;
+HANDLE WINAPI Shim_GetThreadDesktop(DWORD threadId) {
+    (void)threadId;
     return kFakeDesktop;
 }
 
-BOOL WINAPI Shim_GetUserObjectInformationW(
-    HANDLE hObj,
-    int nIndex,
-    PVOID pvInfo,
-    DWORD nLength,
-    LPDWORD lpnLengthNeeded) {
-    if (nIndex != kUoiName) {
-        if (lpnLengthNeeded) {
-            *lpnLengthNeeded = 0;
-        }
-        return TRUE;
-    }
-    const wchar_t* name = (hObj == kFakeWinSta) ? L"WinSta0" : L"Default";
-    DWORD lenChars = static_cast<DWORD>(wcslen(name));
-    DWORD requiredBytes = (lenChars + 1) * sizeof(wchar_t);
-    if (lpnLengthNeeded) {
-        *lpnLengthNeeded = requiredBytes;
-    }
-    if (!pvInfo || nLength < requiredBytes) {
+BOOL WINAPI Shim_GetUserObjectInformationW(HANDLE object, int index, PVOID output, DWORD length, LPDWORD needed) {
+    if (object != kFakeWinSta && object != kFakeDesktop) {
+        SetLastError(ERROR_INVALID_HANDLE);
         return FALSE;
     }
-    memcpy(pvInfo, name, requiredBytes);
+    USEROBJECTFLAGS objectFlags{}; // Matches a non-interactive Server Core container.
+    const wchar_t* name = object == kFakeWinSta ? L"WinSta0" : L"Default";
+    const void* source = nullptr;
+    DWORD required = 0;
+    if (index == UOI_FLAGS) {
+        source = &objectFlags;
+        required = sizeof(objectFlags);
+    } else if (index == kUoiName) {
+        source = name;
+        required = static_cast<DWORD>((wcslen(name) + 1) * sizeof(wchar_t));
+    } else {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (needed) *needed = required;
+    if (!output || length < required) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memcpy(output, source, required);
     return TRUE;
 }
 
-UINT WINAPI Shim_RegisterClipboardFormatW(LPCWSTR lpszFormat) {
-    if (!lpszFormat || !*lpszFormat) {
+UINT WINAPI Shim_RegisterClipboardFormatW(LPCWSTR name) {
+    if (!name || !*name) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-    std::wstring fmt(lpszFormat);
-    EnterCriticalSection(&g_WindowLock);
+    ScopedLock lock(g_WindowLock);
     for (const auto& entry : g_ClipboardFormats) {
-        if (EqualsIgnoreCaseWide(entry.Name, fmt)) {
-            UINT id = entry.Id;
-            LeaveCriticalSection(&g_WindowLock);
-            return id;
-        }
+        if (EqualsIgnoreCaseWide(entry.Name, name)) return entry.Id;
     }
-    UINT id = static_cast<UINT>(InterlockedIncrement(&g_NextClipboardFormat));
-    g_ClipboardFormats.push_back(ClipboardFormatEntry{id, fmt});
-    LeaveCriticalSection(&g_WindowLock);
+    if (g_NextClipboardFormat > 0xFFFF) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    UINT id = static_cast<UINT>(g_NextClipboardFormat);
+    g_ClipboardFormats.push_back({id, name});
+    ++g_NextClipboardFormat;
     return id;
 }
 
-int WINAPI Shim_GetClipboardFormatNameW(UINT format, LPWSTR lpszFormatName, int cchMaxCount) {
-    if (!lpszFormatName || cchMaxCount <= 0) {
-        return 0;
-    }
-    std::wstring name;
-    EnterCriticalSection(&g_WindowLock);
+int WINAPI Shim_GetClipboardFormatNameW(UINT format, LPWSTR output, int capacity) {
+    if (!output || capacity <= 0) return 0;
+    ScopedLock lock(g_WindowLock);
     for (const auto& entry : g_ClipboardFormats) {
         if (entry.Id == format) {
-            name = entry.Name;
-            break;
+            int count = (std::min)(static_cast<int>(entry.Name.size()), capacity - 1);
+            memcpy(output, entry.Name.data(), static_cast<size_t>(count) * sizeof(wchar_t));
+            output[count] = L'\0';
+            return count;
         }
     }
-    LeaveCriticalSection(&g_WindowLock);
-    if (name.empty()) {
-        wchar_t buf[32] = {};
-        swprintf_s(buf, L"Format_%X", format);
-        name = buf;
-    }
-    int copyLen = static_cast<int>(name.size());
-    if (copyLen >= cchMaxCount) {
-        copyLen = cchMaxCount - 1;
-    }
-    memcpy(lpszFormatName, name.data(), static_cast<size_t>(copyLen) * sizeof(wchar_t));
-    lpszFormatName[copyLen] = L'\0';
-    return copyLen;
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return 0;
 }
 
-BOOL WINAPI Shim_MessageBeep(UINT uType) {
-    (void)uType;
+BOOL WINAPI Shim_MessageBeep(UINT type) {
+    (void)type;
     return TRUE;
 }
 
-HRESULT WINAPI Shim_CoInitialize(LPVOID pvReserved) {
-    return CoInitializeEx(pvReserved, 0x2 /* COINIT_APARTMENTTHREADED */);
+HRESULT WINAPI Shim_CoInitialize(LPVOID reserved) {
+    return CoInitializeEx(reserved, 0x2 /* COINIT_APARTMENTTHREADED */);
 }
 
 extern "C" HANDLE WINAPI Shim_CopyEnhMetaFileA(HANDLE hemfSrc, LPCSTR lpszFile) {
@@ -1179,6 +1575,9 @@ const ExportMapping kExportTable[] = {
     {"RegisterClassW", reinterpret_cast<PVOID>(Shim_RegisterClassW)},
     {"RegisterClassExW", reinterpret_cast<PVOID>(Shim_RegisterClassExW)},
     {"UnregisterClassW", reinterpret_cast<PVOID>(Shim_UnregisterClassW)},
+    {"GetClassInfoW", reinterpret_cast<PVOID>(Shim_GetClassInfoW)},
+    {"GetClassInfoExW", reinterpret_cast<PVOID>(Shim_GetClassInfoExW)},
+    {"CallWindowProcW", reinterpret_cast<PVOID>(Shim_CallWindowProcW)},
     {"CreateWindowExW", reinterpret_cast<PVOID>(Shim_CreateWindowExW)},
     {"DestroyWindow", reinterpret_cast<PVOID>(Shim_DestroyWindow)},
     {"DefWindowProcW", reinterpret_cast<PVOID>(Shim_DefWindowProcW)},
@@ -1335,7 +1734,7 @@ extern "C" PVOID WINAPI Shim_ResolveDelayLoadedAPI(
                             base + (intEntry & 0x7FFFFFFFU) + 2);
                         PVOID target = ResolveShimFunction(funcName);
                         if (target) {
-                            WritePointerWithProtection(thunkAddress, target);
+                            if (!WritePointerWithProtection(thunkAddress, target)) return nullptr;
                             return target;
                         }
                     }
@@ -1364,87 +1763,93 @@ HMODULE WINAPI Shim_GetModuleHandleW(LPCWSTR lpModuleName) {
     return g_OrigGetModuleHandleW ? g_OrigGetModuleHandleW(lpModuleName) : nullptr;
 }
 
-void DiscoverPresenceCaches(ModuleHookState& state, IMAGE_SECTION_HEADER* sections, WORD numSections) {
+bool IsImageRange(const ModuleHookState& state, const void* address, size_t length) {
+    ULONG_PTR start = reinterpret_cast<ULONG_PTR>(state.ModuleBase);
+    ULONG_PTR target = reinterpret_cast<ULONG_PTR>(address);
+    return target >= start && target - start <= state.ImageSize && length <= state.ImageSize - (target - start);
+}
+
+bool IsReadableRange(const void* address, size_t length) {
+    const BYTE* cursor = static_cast<const BYTE*>(address);
+    while (length) {
+        MEMORY_BASIC_INFORMATION memory{};
+        if (VirtualQuery(cursor, &memory, sizeof(memory)) != sizeof(memory) ||
+            memory.State != MEM_COMMIT || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return false;
+        size_t available = memory.RegionSize -
+            (reinterpret_cast<ULONG_PTR>(cursor) - reinterpret_cast<ULONG_PTR>(memory.BaseAddress));
+        size_t span = (std::min)(length, available);
+        if (!span) return false;
+        cursor += span;
+        length -= span;
+    }
+    return true;
+}
+
+bool IsWritableDataRange(const ModuleHookState& state, const void* address,
+                         IMAGE_SECTION_HEADER* sections, WORD sectionCount) {
+    if (!IsImageRange(state, address, sizeof(int))) return false;
+    ULONG_PTR rva = reinterpret_cast<ULONG_PTR>(address) - reinterpret_cast<ULONG_PTR>(state.ModuleBase);
+    for (WORD i = 0; i < sectionCount; ++i) {
+        const auto& section = sections[i];
+        DWORD span = (std::max)(section.Misc.VirtualSize, section.SizeOfRawData);
+        if ((section.Characteristics & IMAGE_SCN_MEM_WRITE) != 0 &&
+            (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 &&
+            rva >= section.VirtualAddress && rva - section.VirtualAddress <= span &&
+            sizeof(int) <= span - (rva - section.VirtualAddress)) return true;
+    }
+    return false;
+}
+
+bool IsImageShimmedString(const ModuleHookState& state, const void* address) {
+    if (!IsImageRange(state, address, sizeof(UnicodeStringHeader)) ||
+        !IsReadableRange(address, sizeof(UnicodeStringHeader))) return false;
+    const auto* str = static_cast<const UnicodeStringHeader*>(address);
+    if (!str->Buffer || !str->Length || str->Length > 512 || str->Length > str->MaximumLength ||
+        (str->Length % sizeof(wchar_t)) != 0 || !IsImageRange(state, str->Buffer, str->Length) ||
+        !IsReadableRange(str->Buffer, str->Length)) return false;
+    return IsShimmedApiSetWide(str->Buffer, str->Length / sizeof(wchar_t));
+}
+
+void DiscoverPresenceCaches(ModuleHookState& state, IMAGE_SECTION_HEADER* sections, WORD sectionCount) {
     auto* base = reinterpret_cast<BYTE*>(state.ModuleBase);
-    for (WORD i = 0; i < numSections; ++i) {
-        if ((sections[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) {
-            continue;
-        }
-        DWORD span = sections[i].Misc.VirtualSize < sections[i].SizeOfRawData
-                         ? sections[i].Misc.VirtualSize
-                         : sections[i].SizeOfRawData;
-        if (span < 64) {
-            continue;
-        }
-        DWORD startRva = sections[i].VirtualAddress;
+    for (WORD i = 0; i < sectionCount; ++i) {
+        if ((sections[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+        DWORD span = (std::min)(sections[i].Misc.VirtualSize, sections[i].SizeOfRawData);
+        DWORD start = sections[i].VirtualAddress;
+        if (span < 64 || start > state.ImageSize || span > state.ImageSize - start ||
+            !IsReadableRange(base + start, span)) continue;
+        for (DWORD offset = 48; offset + 16 <= span; ++offset) {
+            BYTE* address = base + start + offset;
+            LPCVOID stringAddress = nullptr;
+            int* cache = nullptr;
 #if defined(_M_IX86)
-        DWORD endRva = startRva + span - 12;
-        for (DWORD rva = startRva + 44; rva <= endRva; ++rva) {
-            BYTE* addr = base + rva;
-            if (*reinterpret_cast<DWORD*>(addr) != 0x41C1940FU ||
-                *reinterpret_cast<WORD*>(addr + 4) != 0x0D89U ||
-                *(addr - 44) != 0xA1U ||
-                *(addr - 21) != 0x68U) {
-                continue;
-            }
-            DWORD cacheVa1 = *reinterpret_cast<DWORD*>(addr - 43);
-            DWORD cacheVa2 = *reinterpret_cast<DWORD*>(addr + 6);
-            if (cacheVa1 != cacheVa2) {
-                continue;
-            }
-            auto* ustrAddr = reinterpret_cast<LPCVOID>(static_cast<ULONG_PTR>(*reinterpret_cast<DWORD*>(addr - 20)));
-            if (IsShimmedUnicodeString(ustrAddr)) {
-                int* cachePtr = reinterpret_cast<int*>(static_cast<ULONG_PTR>(cacheVa2));
-                bool found = false;
-                for (int* existing : state.KnownPresenceCacheAddresses) {
-                    if (existing == cachePtr) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    state.KnownPresenceCacheAddresses.push_back(cachePtr);
-                }
-            }
-        }
+            if (*reinterpret_cast<DWORD*>(address) != 0x41C1940FU ||
+                *reinterpret_cast<WORD*>(address + 4) != 0x0D89U ||
+                *(address - 44) != 0xA1U || *(address - 21) != 0x68U) continue;
+            DWORD first = *reinterpret_cast<DWORD*>(address - 43);
+            DWORD second = *reinterpret_cast<DWORD*>(address + 6);
+            if (first != second) continue;
+            stringAddress = reinterpret_cast<LPCVOID>(static_cast<ULONG_PTR>(*reinterpret_cast<DWORD*>(address - 20)));
+            cache = reinterpret_cast<int*>(static_cast<ULONG_PTR>(second));
 #elif defined(_M_X64)
-        DWORD endRva = startRva + span - 16;
-        for (DWORD rva = startRva + 48; rva <= endRva; ++rva) {
-            BYTE* addr = base + rva;
-            if (*reinterpret_cast<DWORD*>(addr) != 0xD21BD9F6U ||
-                *reinterpret_cast<DWORD*>(addr + 4) != 0x8902C283U ||
-                *(addr + 8) != 0x15U ||
-                *(addr - 48) != 0x8BU ||
-                *(addr - 47) != 0x0DU ||
-                *(addr - 22) != 0x48U ||
-                *(addr - 21) != 0x8DU ||
-                *(addr - 20) != 0x0DU) {
-                continue;
-            }
-            int disp1 = *reinterpret_cast<int*>(addr - 46);
-            int disp2 = *reinterpret_cast<int*>(addr + 9);
-            BYTE* cacheAddr1 = addr - 42 + disp1;
-            BYTE* cacheAddr2 = addr + 13 + disp2;
-            if (cacheAddr1 != cacheAddr2) {
-                continue;
-            }
-            int ustrDisp = *reinterpret_cast<int*>(addr - 19);
-            LPCVOID ustrAddr = addr - 15 + ustrDisp;
-            if (IsShimmedUnicodeString(ustrAddr)) {
-                int* cachePtr = reinterpret_cast<int*>(cacheAddr2);
-                bool found = false;
-                for (int* existing : state.KnownPresenceCacheAddresses) {
-                    if (existing == cachePtr) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    state.KnownPresenceCacheAddresses.push_back(cachePtr);
-                }
-            }
-        }
+            if (*reinterpret_cast<DWORD*>(address) != 0xD21BD9F6U ||
+                *reinterpret_cast<DWORD*>(address + 4) != 0x8902C283U ||
+                *(address + 8) != 0x15U || *(address - 48) != 0x8BU || *(address - 47) != 0x0DU ||
+                *(address - 22) != 0x48U || *(address - 21) != 0x8DU || *(address - 20) != 0x0DU) continue;
+            LONG_PTR firstDisp = *reinterpret_cast<int*>(address - 46);
+            LONG_PTR secondDisp = *reinterpret_cast<int*>(address + 9);
+            ULONG_PTR first = reinterpret_cast<ULONG_PTR>(address - 42) + firstDisp;
+            ULONG_PTR second = reinterpret_cast<ULONG_PTR>(address + 13) + secondDisp;
+            if (first != second) continue;
+            LONG_PTR stringDisp = *reinterpret_cast<int*>(address - 19);
+            stringAddress = reinterpret_cast<LPCVOID>(reinterpret_cast<ULONG_PTR>(address - 15) + stringDisp);
+            cache = reinterpret_cast<int*>(second);
 #endif
+            if (!IsWritableDataRange(state, cache, sections, sectionCount) ||
+                !IsReadableRange(cache, sizeof(*cache)) || !IsImageShimmedString(state, stringAddress)) continue;
+            if (std::find(state.KnownPresenceCacheAddresses.begin(), state.KnownPresenceCacheAddresses.end(), cache) ==
+                state.KnownPresenceCacheAddresses.end()) state.KnownPresenceCacheAddresses.push_back(cache);
+        }
     }
 }
 
@@ -1470,6 +1875,7 @@ void TryDiscoverModuleLocked(HMODULE hMod) {
 
     ModuleHookState state;
     state.ModuleBase = hMod;
+    state.ImageSize = nt->OptionalHeader.SizeOfImage;
 
     const auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (impDir.VirtualAddress != 0) {
@@ -1544,43 +1950,37 @@ void TryDiscoverModuleLocked(HMODULE hMod) {
     g_HookedModules.push_back(state);
 }
 
-void ApplyModuleState(ModuleHookState& state, bool enableShim) {
+bool ApplyModuleState(ModuleHookState& state, bool enableShim) {
+    if (state.HasAppliedState && state.LastAppliedEnable == enableShim) return true;
+    bool success = true;
     if (state.PresenceIatSlot) {
-        WritePointerWithProtection(
-            state.PresenceIatSlot,
-            enableShim ? reinterpret_cast<PVOID>(Shim_ApiSetQueryApiSetPresence)
-                       : state.OriginalPresenceThunk);
+        success = WritePointerWithProtection(state.PresenceIatSlot,
+            enableShim ? reinterpret_cast<PVOID>(Shim_ApiSetQueryApiSetPresence) : state.OriginalPresenceThunk) && success;
     }
     if (state.PresenceExIatSlot) {
-        WritePointerWithProtection(
-            state.PresenceExIatSlot,
-            enableShim ? reinterpret_cast<PVOID>(Shim_ApiSetQueryApiSetPresenceEx)
-                       : state.OriginalPresenceExThunk);
+        success = WritePointerWithProtection(state.PresenceExIatSlot,
+            enableShim ? reinterpret_cast<PVOID>(Shim_ApiSetQueryApiSetPresenceEx) : state.OriginalPresenceExThunk) && success;
     }
     if (state.ResolveDelayLoadIatSlot) {
-        WritePointerWithProtection(
-            state.ResolveDelayLoadIatSlot,
-            enableShim ? reinterpret_cast<PVOID>(Shim_ResolveDelayLoadedAPI)
-                       : state.OriginalResolveDelayLoadThunk);
+        success = WritePointerWithProtection(state.ResolveDelayLoadIatSlot,
+            enableShim ? reinterpret_cast<PVOID>(Shim_ResolveDelayLoadedAPI) : state.OriginalResolveDelayLoadThunk) && success;
     }
     if (state.GetModuleHandleWIatSlot) {
-        WritePointerWithProtection(
-            state.GetModuleHandleWIatSlot,
-            enableShim ? reinterpret_cast<PVOID>(Shim_GetModuleHandleW)
-                       : state.OriginalGetModuleHandleWThunk);
+        success = WritePointerWithProtection(state.GetModuleHandleWIatSlot,
+            enableShim ? reinterpret_cast<PVOID>(Shim_GetModuleHandleW) : state.OriginalGetModuleHandleWThunk) && success;
     }
-
     for (const auto& slot : state.ShimmedSlots) {
-        PVOID target = (enableShim && slot.ShimTarget) ? slot.ShimTarget : slot.InitialThunk;
-        WritePointerWithProtection(slot.IatSlot, target);
+        if (!slot.ShimTarget) continue; // Leave unrelated, already-resolved imports alone.
+        success = WritePointerWithProtection(slot.IatSlot, enableShim ? slot.ShimTarget : slot.InitialThunk) && success;
     }
-    for (PVOID* hmodSlot : state.ShimmedHmodAddresses) {
-        WritePointerWithProtection(hmodSlot, nullptr);
+    for (PVOID* slot : state.ShimmedHmodAddresses) success = WritePointerWithProtection(slot, nullptr) && success;
+    for (int* cache : state.KnownPresenceCacheAddresses) {
+        success = WriteInt32WithProtection(cache, enableShim ? kCachedPresent : kCachedNotPresent) && success;
     }
-    int cacheState = enableShim ? kCachedPresent : kCachedNotPresent;
-    for (int* cachePtr : state.KnownPresenceCacheAddresses) {
-        WriteInt32WithProtection(cachePtr, cacheState);
-    }
+    state.HasAppliedState = success;
+    state.LastAppliedEnable = enableShim;
+    if (!success) OutputDebugStringW(L"nanoserver_sta_shim: failed to apply or restore hook protection.\n");
+    return success;
 }
 
 void RefreshHooksLocked() {
@@ -1592,7 +1992,7 @@ void RefreshHooksLocked() {
     bool enable = !IsOsShimDisabledByEnv();
     g_IsActive = enable;
     for (auto& mod : g_HookedModules) {
-        ApplyModuleState(mod, enable);
+        if (!ApplyModuleState(mod, enable)) g_IsActive = false;
     }
 }
 
@@ -1626,6 +2026,13 @@ VOID CALLBACK OnDllNotification(
     const LdrDllNotificationData* notificationData,
     PVOID context) {
     (void)context;
+    if (notificationReason == 2 && notificationData) {
+        ScopedLock lock(g_HookLock);
+        HMODULE module = static_cast<HMODULE>(notificationData->Loaded.DllBase);
+        g_HookedModules.erase(std::remove_if(g_HookedModules.begin(), g_HookedModules.end(),
+            [module](const ModuleHookState& state) { return state.ModuleBase == module; }), g_HookedModules.end());
+        return;
+    }
     if (notificationReason != 1 || !notificationData || !notificationData->Loaded.BaseDllName) {
         return;
     }
@@ -1664,6 +2071,9 @@ void RegisterLoaderNotification() {
 extern "C" void WINAPI NanoServerStaShim_Refresh() {
     EnsureLocksInitialized();
     EnterCriticalSection(&g_HookLock);
+    for (auto& mod : g_HookedModules) {
+        mod.HasAppliedState = false;
+    }
     RefreshHooksLocked();
     LeaveCriticalSection(&g_HookLock);
 }

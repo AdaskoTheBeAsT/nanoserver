@@ -28,21 +28,31 @@ try {
     $env:PATH    = "$msvcRoot\bin\Hostx64\x86;$kitRoot\bin\$kitVer\x64;$env:SystemRoot\System32"
     $env:INCLUDE = $incCommon
     $env:LIB     = "$msvcRoot\lib\x86;$kitRoot\Lib\$kitVer\ucrt\x86;$kitRoot\Lib\$kitVer\um\x86"
-    & cl.exe /nologo /O2 /MT /EHsc /LD nanoserver_sta_shim.cpp /link /NODEFAULTLIB:ole32.lib /DEF:nanoserver_sta_shim.def /OUT:nanoserver_sta_shim_x86.dll mincore.lib kernel32.lib
+    & cl.exe /nologo /O2 /MT /EHsc /std:c++17 /guard:cf /LD nanoserver_sta_shim.cpp /link /guard:cf /NODEFAULTLIB:ole32.lib /DEF:nanoserver_sta_shim.def /OUT:nanoserver_sta_shim_x86.dll mincore.lib kernel32.lib
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    & cl.exe /nologo /O2 /MT /EHsc /std:c++17 /guard:cf tests\native_regression.cpp /Fo:native_regression_x86.obj /link /guard:cf /OUT:NativeShimRegression_x86.exe kernel32.lib user32.lib
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     Write-Host "[2/3] Building nanoserver_sta_shim_x64.dll (MSVC $msvcVer, SDK $kitVer)..."
     $env:PATH    = "$msvcRoot\bin\Hostx64\x64;$kitRoot\bin\$kitVer\x64;$env:SystemRoot\System32"
     $env:INCLUDE = $incCommon
     $env:LIB     = "$msvcRoot\lib\x64;$kitRoot\Lib\$kitVer\ucrt\x64;$kitRoot\Lib\$kitVer\um\x64"
-    & cl.exe /nologo /O2 /MT /EHsc /LD nanoserver_sta_shim.cpp /link /NODEFAULTLIB:ole32.lib /DEF:nanoserver_sta_shim.def /OUT:nanoserver_sta_shim_x64.dll mincore.lib kernel32.lib
+    & cl.exe /nologo /O2 /MT /EHsc /std:c++17 /guard:cf /LD nanoserver_sta_shim.cpp /link /guard:cf /NODEFAULTLIB:ole32.lib /DEF:nanoserver_sta_shim.def /OUT:nanoserver_sta_shim_x64.dll mincore.lib kernel32.lib
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    & cl.exe /nologo /O2 /MT /EHsc /std:c++17 /guard:cf tests\native_regression.cpp /Fo:native_regression_x64.obj /link /guard:cf /OUT:NativeShimRegression_x64.exe kernel32.lib user32.lib
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     Write-Host "[3/3] Building install_sta_shim.exe (x64)..."
-    & cl.exe /nologo /O2 /MT /EHsc install_sta_shim.cpp /link /OUT:install_sta_shim.exe kernel32.lib advapi32.lib
+    & cl.exe /nologo /O2 /MT /EHsc /std:c++17 /guard:cf install_sta_shim.cpp /link /guard:cf /OUT:install_sta_shim.exe kernel32.lib advapi32.lib
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    Remove-Item -Path *.obj, *.exp, *.lib -Force -ErrorAction SilentlyContinue
+    Write-Host "Building iis_service_monitor.exe (x64)..."
+    & cl.exe /nologo /O2 /MT /EHsc /std:c++17 /guard:cf iis_service_monitor.cpp /link /guard:cf /OUT:iis_service_monitor.exe kernel32.lib advapi32.lib
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Remove-Item -LiteralPath "nanoserver_sta_shim.obj", "nanoserver_sta_shim.exp", "nanoserver_sta_shim.lib", "install_sta_shim.obj", "iis_service_monitor.obj", "native_regression_x86.obj", "native_regression_x64.obj" -Force -ErrorAction SilentlyContinue
 
     $flavours = @(
         "nanoserver-aspnet-x86",
@@ -58,7 +68,9 @@ try {
         if (-not (Test-Path $targetDir)) {
             New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
         }
-        Copy-Item -Path "nanoserver_sta_shim_x86.dll", "nanoserver_sta_shim_x64.dll", "install_sta_shim.exe" -Destination $targetDir -Force
+        Copy-Item -Path "nanoserver_sta_shim_x86.dll", "nanoserver_sta_shim_x64.dll", "install_sta_shim.exe", "iis_service_monitor.exe" -Destination $targetDir -Force
+        $architecture = if ($flavour.EndsWith("-x86")) { "x86" } else { "x64" }
+        Copy-Item -LiteralPath "NativeShimRegression_$architecture.exe" -Destination (Join-Path (Split-Path $PSScriptRoot -Parent) "$flavour\Tests\native\NativeShimRegression.exe") -Force
     }
 
     Write-Host "Done building and syncing STA shim binaries."

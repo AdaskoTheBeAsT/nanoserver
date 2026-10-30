@@ -40,7 +40,7 @@ public class NanoServerFallbackTest
                 pumpPendingMessages: false,
                 api);
 
-            executeResult.Success.Should().BeTrue();
+            executeResult.Success.Should().BeTrue("activation should succeed, but returned {0}", executeResult.Exception);
             executeOutput.Should().Be("Hello, Nano Server!");
 
             Action createOutsideContext = () => _ = new NativeCOM.StringConcatenatorClass();

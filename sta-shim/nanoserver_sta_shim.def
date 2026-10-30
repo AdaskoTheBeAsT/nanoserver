@@ -5,6 +5,9 @@ EXPORTS
     NanoServerStaShim_Refresh
     NanoServerStaShim_RestoreOriginal
     NanoServerStaShim_IsActive
+    GetClassInfoW=Shim_GetClassInfoW
+    GetClassInfoExW=Shim_GetClassInfoExW
+    CallWindowProcW=Shim_CallWindowProcW
     CopyEnhMetaFileA=Shim_CopyEnhMetaFileA
     CreatePenIndirect=Shim_CreatePenIndirect
     GetTextExtentPoint32A=Shim_GetTextExtentPoint32A
@@ -13,4 +16,3 @@ EXPORTS
     GetKeyNameTextA=Shim_GetKeyNameTextA
     ImageList_GetIconSize=Shim_ImageList_GetIconSize
     ImageList_SetIconSize=Shim_ImageList_SetIconSize
-

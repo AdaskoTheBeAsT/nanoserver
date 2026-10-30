@@ -18,7 +18,6 @@ if (-not [string]::IsNullOrWhiteSpace($Version)) {
         $setVersionArgs.DotNetVersion = $DotNetVersion
     }
     & (Join-Path $PSScriptRoot "set-version.ps1") @setVersionArgs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
 $flavours = @(

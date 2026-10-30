@@ -1,4 +1,5 @@
 # escape=`
+ARG BASE_IMAGE=adaskothebeast/nanoserver:iis-netfx-x86
 FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS build
 
 SHELL ["cmd", "/S", "/C"]
@@ -8,7 +9,7 @@ COPY native ./native/
 COPY AdaskoTheBeAsT.Interop.COM.Test ./AdaskoTheBeAsT.Interop.COM.Test/
 RUN dotnet build AdaskoTheBeAsT.Interop.COM.Test\AdaskoTheBeAsT.Interop.COM.Test.csproj -c Release -f net481 -p:Platform=x86 -o C:\out
 
-FROM adaskothebeast/nanoserver:iis-netfx-x86
+FROM ${BASE_IMAGE}
 
 USER ContainerAdministrator
 WORKDIR C:\tests

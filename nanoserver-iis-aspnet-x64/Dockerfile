@@ -24,8 +24,6 @@ RUN curl.exe --fail --location --output C:\ancm.msi `
 
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
 
-ARG DOTNET_VERSION=10.0.14
-
 SHELL ["cmd", "/S", "/C"]
 
 USER ContainerAdministrator
@@ -39,7 +37,10 @@ RUN C:\install\install_features.cmd
 RUN DISM /Online /Get-Capabilities >nul `
     && (net stop TrustedInstaller >nul 2>&1 & del /F /Q C:\Windows\Logs\CBS\*.log C:\Windows\Logs\DISM\*.log >nul 2>&1) `
     && (if exist C:\Windows\WinSxS\pending.xml (echo CBS pending.xml still present && exit /b 1)) `
+    && (if exist C:\Windows\SysWOW64\ntdll.dll (echo WOW64 installed) else (echo WOW64 missing && exit /b 1)) `
     && (if exist C:\Windows\System32\inetsrv\appcmd.exe (echo IIS installed) else (echo IIS/appcmd missing && exit /b 1))
+
+ARG DOTNET_VERSION=10.0.14
 
 # Extract the x64 runtimes directly; Nano Server cannot run the EXE setup engine.
 ENV DOTNET_ROOT="C:\Program Files\dotnet"
@@ -75,11 +76,12 @@ RUN dotnet C:\install\ancm-tool\RegisterAncm.dll `
 
 # Install OS-level user-mode STA & window/message-queue shim for COM Single-Threaded Apartments (STA)
 COPY sta-shim C:\install\sta-shim
-RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim `
+RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim --require-wow64 `
+    && copy /Y C:\install\sta-shim\iis_service_monitor.exe C:\iis_service_monitor.exe `
     && rmdir /S /Q C:\install\sta-shim
 
 WORKDIR C:\inetpub\wwwroot
 
 EXPOSE 80
 
-CMD ["cmd", "/S", "/C", "net start w3svc >nul 2>&1 & ping -t localhost > nul"]
+CMD ["C:\\iis_service_monitor.exe"]

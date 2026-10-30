@@ -2,7 +2,7 @@
 
 **Run the "impossible" .NET workloads on Windows Nano Server 2025 (`ltsc2025`).**
 
-This repository provides production-ready, reusable **Nano Server 2025 base images** (and sample `HealthApi` apps) published to a single unified Docker Hub repository (**`adaskothebeast/nanoserver`**) for the exact .NET scenarios where Microsoft's official images normally force you onto massive **5–8 GB Windows Server Core** containers:
+This repository provides community-maintained, reusable **Nano Server 2025 base images** (and sample `HealthApi` apps) published to a single unified Docker Hub repository (**`adaskothebeast/nanoserver`**) for the exact .NET scenarios where Microsoft's official images normally force you onto massive **5–8 GB Windows Server Core** containers:
 
 - ⚡ **32-bit (`x86`) & 64-bit (`x64`) ASP.NET Core 10** — Self-hosted **Kestrel** (with built-in COM STA & Win32 message-queue shim) & **IIS 10 (`OutOfProcess` / `InProcess`)**
 - 🌐 **64-bit (`x64`) ASP.NET Core 10 on IIS 10** — **`InProcess`** & **`OutOfProcess`** via ANCM V2
@@ -18,7 +18,7 @@ Back in 2022, when Microsoft's Windows Containers team asked in [**`microsoft/Wi
 
 Microsoft listened and introduced **Nano Server Features on Demand** (`Microsoft.NanoServer.Datacenter.WOWSupport` and `Microsoft.NanoServer.IIS`) in **Windows Server 2025 (`ltsc2025`)** ([announcement blog](https://techcommunity.microsoft.com/blog/containers/discover-the-new-era-of-windows-server-2025-nano-server-containers/4413060)).
 
-However, turning those raw OS capabilities into **ready-to-use .NET & IIS containers** still required solving offline CBS/DISM package dependencies, installerless ANCM V2 registration, and `.NET Framework 4.8.1` (`x86` & `x64`) CLR transplantation. **This repository is the culmination of that request — ready for any .NET developer to pull and run.**
+However, turning those raw OS capabilities into **ready-to-use .NET & IIS containers** still required solving offline CBS/DISM package dependencies, installerless ANCM V2 registration, and `.NET Framework 4.8.1` (`x86` & `x64`) CLR transplantation. **These images target the headless scenarios below. Validate the exact native API surface your application uses before deployment.**
 
 ---
 
@@ -52,11 +52,11 @@ Out of the box, `mcr.microsoft.com/windows/nanoserver:ltsc2025` **cannot** run a
 
 | Roadblock on Standard Nano Server 2025 | How This Repository Solves It |
 | :--- | :--- |
-| ❌ **No 32-bit (`x86` / WoW64) subsystem** (`SysWOW64` is missing, so 32-bit processes immediately fail to launch) | ✅ Pulls the exact build-matched `Microsoft-OneCore-WOW64-Package` + language CABs from Windows Update (`10.0.26100.32522` + `10.0.26100.1`) and installs `Microsoft.NanoServer.Datacenter.WOWSupport` offline via `DISM`. |
-| ❌ **No IIS 10 included** | ✅ Pulls and installs `Microsoft-NanoServer-IIS-Package` offline via `DISM`, configuring `w3svc` and `DefaultAppPool`. |
-| ❌ **No `msiexec` or `netsh` to install ASP.NET Core Hosting Bundle (ANCM V2)** | ✅ Extracts `aspnetcoremodule_x64_en_v2.msi` in a builder stage and uses a standalone C# tool (`RegisterAncm.exe`) to register `aspnetcorev2.dll` and inject the `system.webServer/aspNetCore` schema into `applicationHost.config`. |
+| ❌ **No 32-bit (`x86` / WoW64) subsystem** (`SysWOW64` is missing, so 32-bit processes immediately fail to launch) | Installs `Microsoft.NanoServer.Datacenter.WOWSupport` using online `DISM /Add-Capability`, then completes pending CBS servicing and checks capability-provided files. |
+| ❌ **No IIS 10 included** | Installs `Microsoft.NanoServer.IIS` using online `DISM /Add-Capability`, configures IIS, and monitors WAS and W3SVC in the foreground. |
+| ❌ **No `msiexec` or `netsh` to install ASP.NET Core Hosting Bundle (ANCM V2)** | ✅ Extracts `aspnetcoremodule_x64_en_v2.msi` in a builder stage and uses a standalone C# tool (`dotnet RegisterAncm.dll`) to register `aspnetcorev2.dll` and inject the `system.webServer/aspNetCore` schema into `applicationHost.config`. |
 | ❌ **No Full .NET Framework 4.8.1 (`net481`) or `System.Web`** | ✅ Transplants `C:\Windows\Microsoft.NET` (`Framework` + `Framework64`), native CLR CRT forwarders (`mscoree.dll`, `ucrtbase_clr0400.dll`, `vcruntime140_clr0400.dll`, `vcruntime140_1_clr0400.dll`), 32-bit/64-bit `inetsrv`, and NDP/ASP.NET registry hives from Server Core into Nano Server. |
-| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (`win32u.dll` is omitted, causing `CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)` to return `0x80004001 E_NOTIMPL`) | ✅ Bakes a lightweight native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` forwarders so `ApartmentState.STA`, `OleMainThreadWndClass`, and Win32 thread message pumping work out of the box (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). |
+| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
 
 ---
 
@@ -87,8 +87,13 @@ Every folder is cleanly separated into three parts:
    - Layers the published output onto `FROM adaskothebeast/nanoserver:<flavour>`.
    - Serves `GET /health` ➡️ `200 OK` `{"status":"Healthy"}`.
 3. 🧪 **Part 3 — Self-Contained COM & STA Test Suite (`<folder>\Tests\Dockerfile`)**
-   - Contains the full C++ ATL test COM server source code (`Tests\src\NativeCOM\`), native lifetime probe C++ source (`Tests\src\NativeLifetimeProbe\`), prebuilt `NativeCOM.dll`, `NativeCOM.manifest`, `Interop.NativeCOM.dll`, and `NativeLifetimeProbe.dll` (`Tests\native\`), plus the complete `AdaskoTheBeAsT.Interop.COM` library and unit test suite (`Tests\src\AdaskoTheBeAsT.Interop.COM\` and `Tests\AdaskoTheBeAsT.Interop.COM.Test\`).
+   - Contains C++ ATL COM server source (`Tests\src\NativeCOM\`), native lifetime-probe source (`Tests\src\NativeLifetimeProbe\`), prebuilt fixtures (`Tests\native\`), and the managed suite (`Tests\AdaskoTheBeAsT.Interop.COM.Test\`). The managed library is the `AdaskoTheBeAsT.Interop.COM` 4.2.0 NuGet package, not source in `Tests\src`.
+   - Runs `NativeShimRegression.exe --require-shim` in a fresh process before the managed modes. Its shared source is `sta-shim\tests\native_regression.cpp`; normal `user32.dll` imports avoid managed interception and report final call targets.
    - Builds and executes all unit tests inside `FROM adaskothebeast/nanoserver:<flavour>` across all 4 STA shim toggle modes (`Default`, `OS-Level STA Shim Only`, `Library In-Process STA Shim Only`, and `Both Disabled + Runtime Toggle`).
+
+> ⚠️ **Note on `.exe` Binaries & Bitdefender False Positive (`NativeShimRegression`):**
+> All `.exe` files (`install_sta_shim.exe`, `iis_service_monitor.exe`, `NativeShimRegression_x86.exe`, `NativeShimRegression_x64.exe`, and `Tests\native\NativeShimRegression.exe`) are excluded from Git via `.gitignore` and compiled locally from C++ source when you run `sta-shim\build_shim.ps1` (or root `.\go.ps1`).
+> For unknown heuristic reasons, **Bitdefender** may flag the compiled `NativeShimRegression` executable (`NativeShimRegression.exe` / `NativeShimRegression_x86.exe` / `NativeShimRegression_x64.exe`) as unsafe or suspicious. This binary is compiled directly from [`sta-shim\tests\native_regression.cpp`](./sta-shim/tests/native_regression.cpp) and only exercises local Win32 windowing, message-queue, and IAT-hook regression assertions. If Bitdefender blocks or quarantines it during local builds, add an antivirus exclusion for your working directory or for `NativeShimRegression*.exe`.
 
 ---
 
@@ -153,48 +158,60 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.2.0`, `-v1.2`, `-v1`).
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.3.0`, `-v1.3`, `-v1`).
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.2.0, -v1.2, and -v1
-.\set-version.ps1 -Version 1.2.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v1.3.0, -v1.3, and -v1
+.\set-version.ps1 -Version 1.3.0
 
 # Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.2.0 -DotNetVersion 10.0.14
+.\set-version.ps1 -Version 1.3.0 -DotNetVersion 10.0.14
 ```
 
 - **ASP.NET Core 10 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.2.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.2`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.3.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.3`
   - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
 - **ASP.NET Core 10 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.2.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.2`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.3.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.3`
   - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.2.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.2`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.3.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.3`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.2.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.2`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.3.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.3`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.2.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.2`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.3.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.3`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.2.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.2`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.3.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.3`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
+
+---
+
+## ✨ What's New in `v1.3.0` (Published to Docker Hub)
+
+Container revision **`1.3.0`** completes the full [Roundtable review (`R01`–`R26`, `N01`–`N06`)](./docs/issues/roundtable-2026-10-29.md) and is release-qualified across all six flavours (see [`CHANGELOG.md`](./CHANGELOG.md), [`docs/roundtable-fix-validation.md`](./docs/roundtable-fix-validation.md), and [`docs/benchmarks/README.md`](./docs/benchmarks/README.md)):
+
+- **128x–154x Faster Shimmed API-Set Queries & 2.22x Faster COM STA Init (`R17`/`R19`):** Per-module `HasAppliedState` caching, no-op `VirtualProtect` skipping, and explicit `NanoServerStaShim_Refresh()` invalidation after external IAT resets.
+- **Race-Free Cross-Thread `SendMessageW` & Queue Lifetime (`R01`, `R05`–`R09`):** Strict owner-thread dispatch via `std::shared_ptr<PendingSendMessage>`, nested incoming send servicing during waits, owner-thread timers (`SetTimer`/`KillTimer`), typed `GetQueueStatus` bits, `MsgWaitForMultipleObjectsEx` wake masks (`MWMO_INPUTAVAILABLE`, `MWMO_ALERTABLE`, `MWMO_WAITALL`), descendant `HWND` filtering, persistent `WM_QUIT` re-posting, and FLS thread-exit cleanup.
+- **Full Window Creation/Destruction Lifecycle & Class Atoms (`R03`, `R04`, `R10`, `N01`, `N03`):** `WM_NCCREATE`/`WM_CREATE`/`WM_DESTROY`/`WM_NCDESTROY` notifications, bounded `cbWndExtra` access (`Get/SetWindowLong[Ptr]W`), module-scoped window classes with shared/reusable atoms (`GetClassInfo[Ex]W`, `GetClassNameW`), and `CallWindowProcW` chaining.
+- **Foreground IIS Service Monitor (`iis_service_monitor.exe`, `R14`):** Replaces `cmd /c ping -t` as `CMD` across all four IIS images (`iis-aspnet-x64`, `iis-aspnet-x86`, `iis-netfx-x64`, `iis-netfx-x86`), starting `WAS` and `W3SVC`, clearing SCM failure auto-restart actions, and exiting nonzero (terminating lingering `w3wp.exe` / service host processes) if either service stops or loses its host process.
+- **Hardened Installer, Dockerfiles & Control Flow Guard (`R02`, `R11`–`R16`, `R18`, `R21`):** Staged `.new`/`.orig` PE patching with rollback, `--require-wow64` enforcement, `FILE_FLAG_BACKUP_SEMANTICS` for Nano Server's `System32\forwarders` ACLs, read-only `inetsrv\config\schema` handling and `RX` ACL grants in `iis-netfx-*`, `/guard:cf` across all native binaries, and ordinary-import native regression tests (`NativeShimRegression.exe`).
 
 ---
 
@@ -202,10 +219,46 @@ To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder
 
 | Interop Mechanism | Status on Nano Server 2025 | Technical Details |
 | :--- | :--- | :--- |
-| ✅ **Plain Native DLLs via [`AdaskoTheBeAsT.Interop.Unmanaged`](https://github.com/AdaskoTheBeAsT/AdaskoTheBeAsT.Interop.Unmanaged)** | **Works 100% Out of the Box (`x86` & `x64`)** | Standard C/C++/Delphi/PowerBasic/Fortran DLL loading (`LoadLibrary` / `GetProcAddress` / `FreeLibrary`) works natively in both 32-bit (`SysWOW64`) and 64-bit (`System32`). *(Tip: If your native DLL links against the Visual C++ Redistributable like `vcruntime140.dll` / `msvcp140.dll`, copy those CRT DLLs next to your native DLL.)* |
+| ✅ **Plain Native DLLs via [`AdaskoTheBeAsT.Interop.Unmanaged`](https://github.com/AdaskoTheBeAsT/AdaskoTheBeAsT.Interop.Unmanaged)** | **Available for compatible headless DLLs (`x86` & `x64`)** | Standard C/C++/Delphi/PowerBasic/Fortran DLL loading (`LoadLibrary` / `GetProcAddress` / `FreeLibrary`) works natively in both 32-bit (`SysWOW64`) and 64-bit (`System32`). *(Tip: If your native DLL links against the Visual C++ Redistributable like `vcruntime140.dll` / `msvcp140.dll`, copy those CRT DLLs next to your native DLL.)* |
 | ⚠️ **SxS Registration-Free COM via `CreateActCtxW` (`*.manifest`)** | **Blocked by `apisetschema.dll` (even if `sxs.dll` is copied)** | `KernelBase!CreateActCtxW` checks `IsCreateActCtxWWorkerPresent()` (`ext-ms-win-kernel32-sidebyside-l1-1-0`) in the kernel-mapped `apisetschema.dll` *before* calling `sxs.dll`, returning `ERROR_INVALID_FUNCTION (1)`. Copying Server Core's `apisetschema.dll` or `sxssrv.dll` breaks container silo boot (`0xc0370111` at `hcs::System::Start`) because Server Core's schema redirects console/windowing API sets away from Nano Server's headless `coniosrv.dll`. |
-| ✅ **Registration-Free COM with `.manifest` via `DllGetClassObject` + `CoRegisterClassObject` Fallback** | **Works 100% (`x86` & `x64` on STA & MTA)** | Verified with `NativeCOM.dll` + `NativeCOM.manifest`: when `CreateActCtxW` returns `ERROR_INVALID_FUNCTION (1)`, parsing `<comClass clsid="{...}"/>` from the `.manifest` file, calling `DllGetClassObject` on the COM DLL, and registering the `IClassFactory` in-memory via `combase!CoRegisterClassObject(..., CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, out cookie)` allows `new StringConcatenatorClass()` (`CoCreateInstance`) to succeed with `S_OK` on both `x86` and `x64` Nano Server without `regsvr32` or OS modifications! |
-| ✅ **Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) & Win32 Message Pumping** | **Works 100% (`x86` & `x64` via OS-level & in-process STA shims)** | Out of the box, unpatched Nano Server returns `0x80004001` (`E_NOTIMPL`) from `CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)` because `combase.dll` checks `ext-ms-win-rtcore-ntuser-window-ext-l1-1-0` (`win32u.dll`) to create the hidden `OleMainThreadWndClass` STA window. Both these container images (via the native `nanoserver_sta_shim.dll` in `System32` / `SysWOW64`) and `AdaskoTheBeAsT.Interop.COM` (via its in-process `NanoServerStaShim`) redirect the `combase.dll` / `ole32.dll` / `user32.dll` window & message-queue IAT slots to an in-memory user-mode Win32 window and message-queue implementation (`RegisterClassExW`, `CreateWindowExW`, `PeekMessageW`, `PostMessageW`, `SendMessageW`, `MsgWaitForMultipleObjectsEx`, timer & property tables), enabling full `ApartmentState.STA` and `pumpPendingMessages: true` on `x86` and `x64`! |
+| ✅ **Registration-Free COM with `.manifest` via `DllGetClassObject` + `CoRegisterClassObject` Fallback** | **Exercised by the included COM fixtures** | Verified with `NativeCOM.dll` + `NativeCOM.manifest`: when `CreateActCtxW` returns `ERROR_INVALID_FUNCTION (1)`, parsing `<comClass clsid="{...}"/>` from the `.manifest` file, calling `DllGetClassObject` on the COM DLL, and registering the `IClassFactory` in-memory via `combase!CoRegisterClassObject(..., CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, out cookie)` allows `new StringConcatenatorClass()` (`CoCreateInstance`) to succeed with `S_OK` on both `x86` and `x64` Nano Server without `regsvr32` or OS modifications! |
+| **Single-Threaded Apartment (`STA`) and Win32 message pumping** | **Scoped headless implementation, not full Win32 parity** | Native OS-level shimming and the external managed NuGet shim are separate implementations. See the support table below and run the native and managed regression suites for your build. Exact unshimmed failure codes, including `E_NOTIMPL`, depend on the OS build and call path and are not guaranteed here. |
+
+### Native STA shim support and limitations
+
+This table describes the native implementation, not complete Win32 compatibility or
+a performance guarantee. The native regressions must pass on the built images before
+release. See [roundtable fix validation](docs/roundtable-fix-validation.md) for the
+current validation status. The managed NuGet shim is a separate implementation.
+
+The 2026-10-30 checkpoint is **release-qualified across all six images**. Native
+probes, all four managed COM/STA modes (`net10.0` and `net481`), fresh IIS builds,
+and `WAS`/`W3SVC` host-loss qualification pass across all six flavours; see
+[roundtable fix validation](docs/roundtable-fix-validation.md) and
+[performance benchmarks](docs/benchmarks/README.md).
+
+| Area | Native shim support | Limits |
+| :--- | :--- | :--- |
+| Unicode classes and headless windows (R03, R10, N03) | Instance-scoped and global registration, shared/bounded/reusable name atoms, class queries, subclass chaining, creation context and lifecycle notifications, owner-only destruction | Predefined classes use a default headless procedure, not full Windows control implementations. No visible desktop or cross-process windows. |
+| Window data (R04) | `Get/SetWindowLongW` use 4-byte extra-byte access; pointer variants use pointer width; accesses stay within declared `cbWndExtra` | Only the documented indexes in the export table are handled. Window property APIs (`SetPropW`, `GetPropW`, `RemovePropW`) are not implemented. |
+| Sends, posts, filters and quit (R01, R07, R09, N01) | Same-thread sends dispatch directly; cross-thread sends wait for owner dispatch and service incoming sends. Pending sends cancel on destruction/exit. Filters include descendants; quit state ignores filters. | A non-pumping owner can block `SendMessageW` indefinitely, as there is no timeout. `SendMessageTimeoutW`, broadcasts and cross-process messaging are not implemented. Explicitly posted `WM_QUIT` also uses synthetic quit state. |
+| Queue lifetime (R08) | Only an owner creates its queue; FLS cleanup removes its windows, timers and queued work at normal thread exit | Posting to another thread without an initialized queue fails. Forced thread termination and fiber-hosted workloads are not qualified. |
+| Timers, waits and queue status (R05, R06) | Lazy owner-thread deadlines, low-priority `WM_TIMER`, replacement/cancellation, typed current/changed queue bits, wake masks and the three documented MWMO flags | Timer delivery requires pumping and is not real-time; coalescing tolerance is ignored. Wait-all uses bounded waits to keep servicing sent messages. No physical input or painting subsystem. |
+| ANSI window/message APIs (N02) | Not implemented | Probe the exact engine imports and dynamic lookups before selecting these images. The few ANSI GDI exports do not imply ANSI window support. |
+| GDI, icons and common controls | Minimal startup stubs for selected legacy imports | Synthetic handles, fixed text/icon approximations and no rendering or general GDI resource lifetime. Not a replacement for a GUI, VCL controls, GDI or DirectX. |
+| Hook memory protection (R17, R19) | Serialized writes, no-op skipping, derived-address bounds checks and original page-protection restoration | Non-executable data pages become writable without execute access. An already-executable page may briefly become writable and executable. This is not a blanket W^X guarantee. |
+
+The `AdaskoTheBeAsT.Interop.COM` **4.2.0** package remains pinned in the managed tests.
+Its `NanoServerWindowManager` tests document that package's known deviations,
+including duplicate registration and timeout fallback behavior. They are not native
+shim conformance tests and are not rewritten to pretend the package has been fixed.
+
+The native and managed shims keep separate class/window state. Select a provider
+before COM/window initialization and use a new process when changing providers.
+Refreshing hooks does not migrate cached COM atoms or existing windows. The mode
+runners retain every test, but run each of the two process-wide provider-switching
+tests in its own process. Those tests verify settings and interception, not live
+state migration.
 
 ### 🎛️ Toggling the OS-Level and Library-Level Shims (for Testing & Diagnostics)
 
@@ -214,26 +267,74 @@ Both the container-level native STA shim (`nanoserver_sta_shim.dll`) and the `Ad
 | Environment Variable / API | Target | Effect when Set to `1` / `true` |
 | :--- | :--- | :--- |
 | `NANOSERVER_DISABLE_STA_SHIM=1` | **OS-Level Native Shim** (`nanoserver_sta_shim.dll` in `System32` & `SysWOW64`) | Disables the container's native IAT hooks on `combase.dll`, `ole32.dll`, and `user32.dll` (and exports `NanoServerStaShim_RestoreOriginal()` / `NanoServerStaShim_Refresh()` so managed code can toggle it dynamically). |
-| `ADASKO_NANOSERVER_DISABLE_STA_SHIM=1` / `NanoServerOptions.EnableStaShim = false` | **Library-Level In-Process STA Shim** (`AdaskoTheBeAsT.Interop.COM`) | Disables `AdaskoTheBeAsT.Interop.COM`'s built-in managed STA & Win32 message-queue shim (`NanoServerStaShim`). When both `NANOSERVER_DISABLE_STA_SHIM=1` and `ADASKO_NANOSERVER_DISABLE_STA_SHIM=1` are set, unshimmed Nano Server behavior is restored (`CoInitializeEx(..., COINIT_APARTMENTTHREADED)` returns `E_NOTIMPL`). |
+| `ADASKO_NANOSERVER_DISABLE_STA_SHIM=1` / `NanoServerOptions.EnableStaShim = false` | **Library-Level In-Process STA Shim** (`AdaskoTheBeAsT.Interop.COM`) | Disables `AdaskoTheBeAsT.Interop.COM`'s built-in managed STA & Win32 message-queue shim (`NanoServerStaShim`). When both switches are set, the shims are disabled; do not assume a particular unshimmed HRESULT without a control on the selected OS build. |
 | `ADASKO_NANOSERVER_DISABLE_SXS_FALLBACK=1` / `NanoServerOptions.EnableSxsFallback = false` | **Library-Level SxS Manifest Fallback** (`AdaskoTheBeAsT.Interop.COM`) | Disables the automatic `DllGetClassObject` + `CoRegisterClassObject` manifest fallback when `CreateActCtxW` fails on Nano Server. |
 
 ### ⚖️ Which Method Is Better: OS-Level Container Shim (`nanoserver_sta_shim.dll`) vs. `AdaskoTheBeAsT.Interop.COM` In-Process Shim?
 
-Both mechanisms pass 100% of the COM, STA, and Win32 message-pumping test suite (`174/174` on .NET 10 and `175/175` on .NET Framework 4.8.1), but they operate at different layers and complement each other:
+Earlier managed-mode runs passed their selected cases, but did not assert the native contracts behind R01 to R10. The two shims operate at different layers; those historical passes do not establish full compatibility:
 
 | Criterion | OS-Level Native Shim (`nanoserver_sta_shim.dll` in Container) | Library-Level In-Process Shim (`AdaskoTheBeAsT.Interop.COM`) |
 | :--- | :--- | :--- |
-| **Initialization Timing** | ✅ **Best:** Loaded by the Windows PE loader during `DLL_PROCESS_ATTACH` of `user32.dll` / `ole32.dll` **before the .NET CLR or `Main()` starts**. Even `[STAThread]` on `Main()` and early native `CoInitialize` calls work immediately. | ⚠️ Loaded when `AdaskoTheBeAsT.Interop.COM.dll` is first loaded into the process (`[ModuleInitializer]` on .NET 8/9/10, or first call into `ComExecutor` / `NanoServerOptions` on .NET Framework). |
-| **Runtime Call Overhead** | ✅ **Best:** Pure native C++ (`nanoserver_sta_shim.dll` ➡️ `combase.dll` / `ole32.dll`). Zero managed/unmanaged reverse-P/Invoke transitions or GC pinning overhead during internal COM apartment window/message calls. | ⚡ Managed reverse-P/Invoke delegates (`UnmanagedCallersOnly` / `Marshal.GetFunctionPointerForDelegate`). Fast enough for typical COM activation and message pumping, but crosses the managed/unmanaged boundary. |
-| **Scope of Protection** | ✅ **Process-wide:** Works for **any** code in the container (including third-party COM wrappers, `Activator.CreateInstance`, or native C++ code that does not reference `AdaskoTheBeAsT.Interop.COM`). | 🎯 Scoped to processes that load `AdaskoTheBeAsT.Interop.COM`. |
-| **Registration-Free COM (`*.manifest` SxS)** | ❌ Does **not** parse `.manifest` files (`CreateActCtxW` is blocked by Nano Server's kernel `apisetschema.dll`). Without `AdaskoTheBeAsT.Interop.COM`, COM DLLs must be registered via `regsvr32`. | ✅ **Best:** Automatically parses `<comClass clsid="{...}"/>` from `.manifest` XML and registers `IClassFactory` in-memory via `DllGetClassObject` + `CoRegisterClassObject` without `regsvr32`. |
-| **Works on Stock Microsoft Nano Server Images?** | ❌ Requires `install_sta_shim.exe` to have been run when building the container image (pre-installed in all `adaskothebeast/nanoserver` images). | ✅ **Best:** Zero Dockerfile/OS changes required — works on stock `mcr.microsoft.com/windows/nanoserver:ltsc2025` and `mcr.microsoft.com/dotnet/aspnet:10.0-nanoserver-ltsc2025` purely by referencing the NuGet package. |
+| **Initialization timing** | Loaded with the patched forwarders, before managed startup in that loading path. Qualify early native COM initialization on the target image. | Loaded when the NuGet package initializes. Exact timing depends on the runtime. |
+| **Call path** | Native C++ calls with no managed callback transition for the implemented message APIs. See [measured benchmarks](docs/benchmarks/README.md) for microbenchmark and mode comparisons. | Uses managed callbacks for its in-process shim. Validate callback lifetime and startup ordering for the application. |
+| **Scope** | Process-wide for the hooked API/import paths, including native callers. This is not support for arbitrary Win32 APIs or every dynamically resolved import. | Applies to processes that load and enable the package. |
+| **Registration-free COM** | Does not parse manifests. The application needs its own factory registration, suitable COM registration, or another fallback. | Provides a limited in-process `<file>` / `<comClass>` factory-registration fallback, not full SxS assembly binding. |
+| **Installation** | Requires container system DLL changes by `install_sta_shim.exe`. | Does not require that native installer; its behavior is that of the pinned external package. |
 
-#### 🏆 Recommendation
+#### Choosing a shim
 
-1. **For STA & Win32 Message Pumping (`COINIT_APARTMENTTHREADED`):** **The OS-level native shim (`nanoserver_sta_shim.dll`) baked into these `adaskothebeast/nanoserver` images is better.** Because it is linked directly into the container's `user32.dll` and `ole32.dll` forwarders, it initializes before the CLR starts, supports `[STAThread]` on `Main()`, avoids managed reverse-P/Invoke overhead, and never has to worry about CLR module-initializer lock ordering.
-2. **For Registration-Free COM (`*.manifest` without `regsvr32`):** **`AdaskoTheBeAsT.Interop.COM` is essential**, because it provides the manifest-driven `DllGetClassObject` + `CoRegisterClassObject` fallback that bypasses Nano Server's missing Side-by-Side (`CreateActCtxW`) subsystem.
-3. **Best Production Setup (Default):** **Use `AdaskoTheBeAsT.Interop.COM` on top of `adaskothebeast/nanoserver`.** When both are present, `AdaskoTheBeAsT.Interop.COM` automatically detects `nanoserver_sta_shim.dll` in the process and delegates STA/window management to the faster native OS-level shim while handling registration-free `.manifest` activation and lifetime management in managed code. And if your code is ever deployed to a stock Microsoft Nano Server container without `nanoserver_sta_shim.dll`, `AdaskoTheBeAsT.Interop.COM`'s built-in STA shim seamlessly takes over as a fallback.
+Use the native shim when its supported headless contracts fit the application and
+early native initialization is needed. Use the managed package for its documented
+COM lifetime and manifest-fallback features. When both are loaded, verify which
+implementation receives each call instead of assuming their behavior is identical.
+Neither choice provides general GUI compatibility; for measured microbenchmark,
+COM mode, and multi-worker STA workload comparisons across `v1.3.0`, `v1.2.0`, and
+Windows Server Core `ltsc2025`, see [`docs/benchmarks/README.md`](./docs/benchmarks/README.md).
+
+---
+
+## 📊 Performance Benchmarks (`v1.3.0` vs. `v1.2.0` vs. Windows Server Core `ltsc2025`)
+
+Full benchmark methodology, raw logs, and C++/PowerShell harness sources are documented in [**`docs/benchmarks/README.md`**](./docs/benchmarks/README.md) and [**`docs/roundtable-fix-validation.md`**](./docs/roundtable-fix-validation.md).
+
+### 1. Native `nanoserver_sta_shim.dll` Microbenchmarks (`x64` & `x86`)
+
+Caching per-module hook state (`HasAppliedState`, `R17`/`R19`), skipping no-op `VirtualProtect` syscalls, and tracking queue status bits in user mode (`R06`/`R08`) yielded dramatic hot-path speedups in `v1.3.0` while eliminating the `v1.2.0` 50 ms cross-thread `SendMessageW` wrong-thread fallback (`R01`):
+
+| Benchmark Operation | Arch | Native Server Core (`ltsc2025`) | Nano Server `v1.2.0` | Nano Server `v1.3.0` | `v1.3.0` vs. `v1.2.0` | `v1.3.0` vs. Server Core |
+| :--- | :---: | ---: | ---: | ---: | ---: | ---: |
+| **`ApiSetQuery_50k`**<br>50,000 queries on shimmed `ext-ms-win-ntuser-window-l1-1-0` (`R17`/`R19`) | `x64`<br>`x86` | *(unhooked)*<br>*(unhooked)* | `40,174.82 ms`<br>`49,941.56 ms` | **`261.57 ms`**<br>**`390.65 ms`** | **153.6x faster** (`-99.35%`)<br>**127.8x faster** (`-99.22%`) | — |
+| **`COM_STA_InitUninit_5k`**<br>5,000 `CoInitializeEx(COINIT_APARTMENTTHREADED)` + `CoUninitialize` cycles | `x64`<br>`x86` | `136.66 ms`<br>`319.21 ms` | `84.77 ms`<br>`64.55 ms` | **`38.13 ms`**<br>**`56.58 ms`** | **2.22x faster** (`-55.0%`)<br>**1.14x faster** (`-12.4%`) | **3.58x faster** (`-72.1%`)<br>**5.64x faster** (`-82.3%`) |
+| **`WindowCreateDestroy_10k`**<br>10,000 `CreateWindowExW(HWND_MESSAGE)` + `DestroyWindow` cycles (`R03`/`R10`) | `x64`<br>`x86` | `114.05 ms`<br>`291.95 ms` | `3.60 ms`<br>`2.26 ms` | **`3.31 ms`**<br>**`5.71 ms`** | **1.09x faster**<br>`0.40x` *(4 `R03` msgs)* | **34.5x faster** (`-97.1%`)<br>**51.2x faster** (`-98.0%`) |
+| **`PostPeekDispatch_200k`**<br>200,000 `PostMessageW` + `MsgWait` + `PeekMessageW` + `DispatchMessageW` (`R06`/`R08`) | `x64`<br>`x86` | `492.34 ms`<br>`576.97 ms` | `160.91 ms`<br>`234.94 ms` | **`82.48 ms`**<br>**`133.17 ms`** | **1.95x faster** (`-48.7%`)<br>**1.76x faster** (`-43.3%`) | **5.97x faster** (`-83.2%`)<br>**4.33x faster** (`-76.9%`) |
+| **`SendMessageCrossThread_20k`**<br>20,000 cross-thread synchronous STA `SendMessageW` calls (`R01`/`R08`) | `x64`<br>`x86` | `197.10 ms`<br>`321.15 ms` | `124.51 ms`<br>`183.31 ms` | **`128.88 ms`**<br>**`181.92 ms`** | `0.97x`<br>**1.01x faster** | **1.53x faster** (`-34.6%`)<br>**1.77x faster** (`-43.4%`) |
+| **`Concurrent10ThreadPumps_200k`**<br>10 STA threads × 20,000 messages = 200,000 messages (`R08`/`R24`) | `x64`<br>`x86` | `2,595.65 ms`<br>`2,898.08 ms` | `763.04 ms`<br>`898.08 ms` | **`816.75 ms`**<br>**`704.42 ms`** | `0.93x`<br>**1.27x faster** (`-21.6%`) | **3.18x faster** (`-68.5%`)<br>**4.11x faster** (`-75.7%`) |
+
+### 2. Managed `AdaskoTheBeAsT.Interop.COM.Test` Suite Across All 6 Flavours
+
+| Flavour / Target Framework | Tests | Native Server Core (`ltsc2025`) | Nano Server `v1.3.0` Mode 1 (Default: OS + Library Shim) | Nano Server `v1.3.0` Mode 2 (OS Shim Only) | Nano Server `v1.3.0` Mode 3 (Library Shim Only) | Mode 2 vs. Server Core |
+| :--- | :---: | ---: | ---: | ---: | ---: | ---: |
+| **`nanoserver-aspnet-x64`** (`net10.0\|x64`) | 172 | `448 ms` | `486 ms` | **`406 ms`** | `427 ms` | **1.10x faster** (`-9.4%`) |
+| **`nanoserver-aspnet-x86`** (`net10.0\|x86`) | 172 | `583 ms` | `531 ms` | **`492 ms`** | `477 ms` | **1.18x faster** (`-15.6%`) |
+| **`nanoserver-iis-aspnet-x64`** (`net10.0\|x64`) | 172 | `448 ms` | `450 ms` | **`409 ms`** | `389 ms` | **1.10x faster** (`-8.7%`) |
+| **`nanoserver-iis-aspnet-x86`** (`net10.0\|x86`) | 172 | `583 ms` | `561 ms` | **`532 ms`** | `487 ms` | **1.10x faster** (`-8.7%`) |
+| **`nanoserver-iis-netfx-x64`** (`net481\|x64`) | 173 | `720 ms` | `842 ms` | **`824 ms`** | `830 ms` | `0.87x` (`+104 ms`) |
+| **`nanoserver-iis-netfx-x86`** (`net481\|x86`) | 173 | `599 ms` | `683 ms` | **`665 ms`** | `681 ms` | `0.90x` (`+66 ms`) |
+
+### 3. Real-World 200-Test `AhuNew` Suite (32-Bit Delphi `CoilLib` STA Worker Pool & ASP.NET Core Minimal API)
+
+Running all 200 engineering and interop tests directly via the 32-bit `.NET 10.0.14` host (`C:\Program Files (x86)\dotnet\dotnet.exe`) inside `--isolation=process --cpus 10` demonstrates full execution-speed parity with Native Windows Server Core (`ltsc2025`) at ~13% of the compressed image size:
+
+| Benchmark Metric | Nano Server `v1.3.0` (`aspnet-x86`) | Nano Server `v1.2.0` (`aspnet-x86`) | Original Server Core (`ltsc2025`) | Server Core .NET 10 SDK (`ltsc2025`) |
+| :--- | ---: | ---: | ---: | ---: |
+| **Total 200-Test Suite (Cold / Warm)** | **`14.56 s` / `14.37 s`** | `14.35 s` / `14.14 s` | `14.70 s` / `14.85 s` | `14.60 s` / `14.59 s` |
+| **10-Worker STA Pool — Water (`200` concurrent)** | **`285.51 ms` (`700.5 calc/s`, `4.62x`)** | `299.55 ms` (`667.7 calc/s`, `4.31x`) | `305.36 ms` (`655.0 calc/s`, `4.18x`) | `284.56 ms` (`702.8 calc/s`, `4.59x`) |
+| **10-Worker STA Pool — Freon (`200` concurrent)** | **`338.23 ms` (`591.3 calc/s`, `5.00x`)** | `383.64 ms` (`521.3 calc/s`, `3.93x`) | `358.21 ms` (`558.3 calc/s`, `4.18x`) | `301.07 ms` (`664.3 calc/s`, `5.51x`) |
+| **10-Worker STA Pool — Condensing (`200` concurrent)** | **`259.79 ms` (`769.8 calc/s`, `4.87x`)** *(warm)* | `251.84 ms` (`794.1 calc/s`, `5.11x`) | `273.21 ms` (`732.1 calc/s`, `5.23x`) | `261.07 ms` (`766.1 calc/s`, `5.09x`) |
+| **10-Worker STA Pool — Glycol (`40` concurrent)** | **`176.18 ms` (`227.0 calc/s`, `4.73x`)** | `193.82 ms` (`206.4 calc/s`, `3.96x`) | `173.85 ms` (`230.1 calc/s`, `4.24x`) | `228.14 ms` (`175.3 calc/s`, `3.28x`) |
+| **ASP.NET Core Minimal API — 1-Worker (`120` HTTP reqs)** | **`807.04 ms` (`148.7 req/s`, `6.73 ms/req`)** | `819.80 ms` (`146.4 req/s`, `6.83 ms/req`) | `807.16 ms` (`148.7 req/s`, `6.73 ms/req`) | `811.20 ms` (`147.9 req/s`, `6.76 ms/req`) |
+| **ASP.NET Core Minimal API — 10-Worker (`120` HTTP reqs)** | **`124.09 ms` (`967.0 req/s`, `1.03 ms/req`)** | `118.30 ms` (`1014.4 req/s`, `0.99 ms/req`) | `124.84 ms` (`961.2 req/s`, `1.04 ms/req`) | `122.25 ms` (`981.6 req/s`, `1.02 ms/req`) |
 
 ---
 
@@ -435,7 +536,7 @@ When an application calls `CoCreateInstance(rclsid, pUnkOuter, dwClsContext, rii
 2. **Thread Activation Context Stack (`TEB->ActivationContextStackPointer`):** The SxS manifest table populated by `CreateActCtxW` + `ActivateActCtx` (missing on Nano Server).
 3. **Windows Registry (`HKCR\CLSID\{...}\InprocServer32`):** Global or per-user registry lookup populated by `regsvr32`.
 
-Crucially, **step 1 (`CoRegisterClassObject`) runs *before* step 2 (SxS) and step 3 (Registry), and `CoRegisterClassObject` is 100% present and functional in Nano Server's `combase.dll`!**
+Crucially, **step 1 (`CoRegisterClassObject`) runs *before* step 2 (SxS) and step 3 (Registry), and the included fixture uses `CoRegisterClassObject` from Nano Server's `combase.dll`.**
 
 Historically, developers think of `CoRegisterClassObject` as an API for out-of-process (`CLSCTX_LOCAL_SERVER`) `.exe` servers. However, `combase.dll` fully supports registering `CLSCTX_INPROC_SERVER` with `REGCLS_MULTIPLEUSE` in the current process's class table!
 
@@ -467,7 +568,7 @@ NativeCOM.manifest (XML)
 
 ### 4. Breakthrough #2: How We Engineered a User-Mode Win32 Window & Message-Queue Engine for COM STA
 
-Why does `CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)` fail with `0x80004001` (`E_NOTIMPL`) on Nano Server?
+Why does COM STA initialization need window/message support that stock Nano Server omits? The exact failure code depends on the OS build and call path.
 
 Because a Single-Threaded Apartment (STA) is, by definition in the COM specification, **a thread whose incoming cross-apartment calls are serialized through a Win32 window message queue**. When the first STA thread initializes in `combase.dll` (`InitMainThreadWnd` / `RegisterOleWndClass`), `combase.dll` calls:
 - `IsRegisterClassWPresent()` (checking `ext-ms-win-rtcore-ntuser-window-ext-l1-1-0`)
@@ -478,56 +579,45 @@ When another thread makes a COM call into that STA apartment, `combase.dll` post
 
 Notice the profound architectural insight here:
 > **`combase.dll` does NOT need pixels, a monitor, GDI, DirectX, or a kernel-mode display driver (`win32k.sys`).** It only needs:
-> 1. A handle table mapping synthetic `HWND` values to an owning `ThreadId`, class name, `WNDPROC` function pointer, `GWLP_USERDATA`, and window property bag (`SetPropW` / `GetPropW` / `RemovePropW`).
+> 1. A handle table mapping synthetic `HWND` values to an owning `ThreadId`, class name, `WNDPROC` function pointer, `GWLP_USERDATA`, and declared extra window bytes. The native shim does not implement a window property bag.
 > 2. A per-thread FIFO message queue (`MSG`) backed by a real Win32 manual-reset `EVENT` handle (`CreateEventW`) so `PostMessageW` / `PostThreadMessageW` can wake a sleeping `MsgWaitForMultipleObjectsEx` or `GetMessageW` call.
 > 3. Synchronous same-thread dispatch (`SendMessageW` / `DispatchMessageW`) that directly invokes the registered `WNDPROC` callback (`lpfnWndProc(hwnd, msg, wParam, lParam)`).
 
-We built this exact headless Win32 window and message-queue engine in **both** pure C++ (`nanoserver_sta_shim.dll`) and C# (`NanoServerStaShim` + `NanoServerWindowManager`).
+The native C++ shim and the external C# package both provide headless window/message implementations. Their supported contracts and known deviations differ; the table above describes the native shim.
 
-#### How the OS-Level Shim (`install_sta_shim.exe` + `nanoserver_sta_shim.dll`) Hooks Every Process Without Touching the Kernel
+#### How the OS-level shim is installed and loaded
 
-Getting `combase.dll` to use our user-mode window engine automatically in *every* container process (before `.NET` or `Main()` even starts) required solving two deep Windows loader mechanisms: **`\KnownDlls`** and **Delay-Loaded / API-Set Import Address Tables (IATs)**:
+1. **Container build:** `install_sta_shim.exe` refuses a host with
+   `System32\win32u.dll`. It preflights the payload and the `user32.dll`,
+   `ole32.dll`, `gdi32.dll` and `comctl32.dll` forwarders for each selected
+   architecture before changing system files. The five images that install
+   WOW64 pass `--require-wow64` (`/require-x86` is an alias); x64 Kestrel does
+   not require an x86 payload.
+2. **File replacement:** the installer stages PE changes in `.new`, flushes and
+   verifies them, moves the untouched original to `.orig`, and restores it if
+   replacement fails. It patches API-query imports and adds missing export
+   forwarders to `nanoserver_sta_shim.<ExportName>`. Both the forwarder and
+   system-directory copies are re-read and checked. Each required failure
+   returns nonzero. KnownDLLs entries for `user32`, `ole32` and `gdi32` are
+   removed only after the files have passed verification; already-absent
+   values count as success. Installation is not a transaction across all files;
+   a failed Docker build must not be published.
+3. **Process load:** processes that load a patched forwarder also load
+   `nanoserver_sta_shim.dll`. The shim redirects API-query and delay-load slots
+   in `combase.dll`, `user32.dll` and `ole32.dll`. The presence functions are
+   `Shim_ApiSetQueryApiSetPresence` and `Shim_ApiSetQueryApiSetPresenceEx`, not
+   an unconditional replacement for every API namespace. Cache discovery is
+   range-checked; a captured module is rewritten only when its enable state
+   changes or a previous write failed.
+4. **Execution:** process-local window, class, timer and queue tables use
+   `CRITICAL_SECTION` locks. Window procedures run outside the window lock,
+   on the owner thread. The thread registers its own queue for FLS cleanup.
+   `NanoServerStaShim_Refresh()` applies an environment-switch change;
+   `NanoServerStaShim_RestoreOriginal()` restores captured slots.
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Step 1 (Container Build Time — install_sta_shim.exe)                        │
-│  • Safety Check: Aborts immediately if C:\Windows\System32\win32u.dll exists │
-│  • Removes "user32", "ole32", and "gdi32" from HKLM\...\KnownDLLs            │
-│    so ntdll loads System32\user32.dll, ole32.dll & gdi32.dll from disk       │
-│  • Rewrites the PE Import Directory (IMAGE_IMPORT_DESCRIPTOR) of             │
-│    System32\forwarders\user32.dll, ole32.dll, gdi32.dll & comctl32.dll       │
-│    (and SysWOW64\forwarders\*) to import nanoserver_sta_shim.dll             │
-│  • Rebuilds the PE Export Directory (.edata2) of gdi32.dll, user32.dll &     │
-│    comctl32.dll to add missing Win32 exports required by legacy Delphi/C++   │
-│    VCL/COM DLLs (CopyEnhMetaFileA, CreatePenIndirect, GetTextExtentPoint32A, │
-│    SetWinMetaFileBits, CreateIcon, GetKeyNameTextA, ImageList_Get/SetIconSize│
-│    forwarded to nanoserver_sta_shim.<ExportName>)                            │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Step 2 (Process Startup — ntdll.dll PE Loader)                              │
-│  • Process loads user32.dll, ole32.dll, gdi32.dll, or comctl32.dll           │
-│  • PE loader automatically loads nanoserver_sta_shim.dll and runs DllMain    │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │
-                                       ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Step 3 (IAT Patching in DllMain / NanoServerStaShim_Refresh)                │
-│  • Walks IMAGE_IMPORT_DESCRIPTOR & IMAGE_DELAYLOAD_DESCRIPTOR of loaded      │
-│    modules (combase.dll, ole32.dll, user32.dll)                              │
-│  • Redirects IsRegisterClassWPresent() ➡️ Shim_AlwaysTrue() (returns 1)      │
-│  • Redirects RegisterClassExW, CreateWindowExW, DestroyWindow,               │
-│    PeekMessageW, GetMessageW, TranslateMessage, DispatchMessageW,            │
-│    PostMessageW, PostThreadMessageW, SendMessageW, DefWindowProcW,           │
-│    MsgWaitForMultipleObjectsEx, SetTimer, KillTimer, SetPropW, GetPropW,     │
-│    RemovePropW, GetWindowLongPtrW, SetWindowLongPtrW, GetWindowThread-       │
-│    ProcessId, IsWindow ➡️ User-Mode Ring-3 Window & Message-Queue Engine     │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-Why did `install_sta_shim.exe` have to remove `user32`, `ole32`, and `gdi32` from `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`?
-Because at boot time, the Session Manager (`smss.exe`) pre-maps every DLL listed in `KnownDLLs` into the kernel Object Manager directory `\KnownDlls` (64-bit) and `\KnownDlls32` (32-bit). When a process loads a DLL listed in `\KnownDlls`, `ntdll.dll` maps the cached section object and **ignores** changes on disk if the section is already pre-configured, or fails if a `KnownDll` depends on a non-`KnownDll`. Removing `user32`, `ole32`, and `gdi32` from the container's `KnownDLLs` registry key forces `ntdll.dll` to load our patched `user32.dll`, `ole32.dll`, and `gdi32.dll` cleanly from `C:\Windows\System32` (and `C:\Windows\SysWOW64`), pulling `nanoserver_sta_shim.dll` into every 32-bit and 64-bit COM/native process automatically!
+Removing the KnownDLLs entries is an intentional part of loading the patched disk
+copies, not a general-purpose Windows compatibility layer. Do not run this installer
+on a workstation or Server Core host, or transplant Server Core's API-set schema.
 
 ### 5. Breakthrough #3: Solving the `0xc0370111` (`hcs::System::Start`) Post-DISM Servicing Race Condition in Docker Builds
 
@@ -554,34 +644,29 @@ Opening a CBS session via `DISM /Online /Get-Capabilities` while the container i
 
 ---
 
-## 🛡️ Security & Parity Audit: Is This Really as Good and Secure as Microsoft's Native Solution?
+## Security boundaries and compatibility qualifications
 
-As a seasoned architect, you should always ask two hard questions before putting low-level interop or OS shims into production:
-1. **Is it secure?**
-2. **Is the replaced functionality truly on par with Microsoft's native implementation, and where are the exact boundaries?**
+The native shim runs inside the application process. That avoids implementing a
+desktop GUI subsystem, but it does not make arbitrary native code safe. The shim
+shares the process's permissions and address space; a memory-safety bug can still
+compromise the process.
 
-### 1. Security Architecture: Why User-Mode STA Shimming Is Actually *Safer* Than Server Core
-
-| Security Dimension | Full Windows Server Core (`win32k.sys` + `sxssrv.dll`) | Nano Server + `nanoserver_sta_shim.dll` / `AdaskoTheBeAsT.Interop.COM` |
-| :--- | :--- | :--- |
-| **Kernel Ring-0 Attack Surface (`win32k.sys`)** | ⚠️ **High historical CVE surface:** `win32u.dll` issues hundreds of system calls into Ring-0 `win32k.sys` / `win32kfull.sys`. Over the past 25 years, `win32k.sys` has been the **#1 source of Windows Kernel Elevation-of-Privilege (EoP) vulnerabilities** because complex window/menu/message state is parsed inside kernel mode. | ✅ **Zero Ring-0 GUI surface:** Everything in `nanoserver_sta_shim.dll` and `NanoServerStaShim` runs in **unprivileged Ring-3 user mode** inside the calling process's private virtual address space. A bug in a COM component cannot exploit a `win32k.sys` kernel syscall because `win32k.sys` is never called. |
-| **Cross-Process Isolation (UIPI / Shatter Attacks)** | ⚠️ Shared desktop heaps and cross-process window message queues require User Interface Privilege Isolation (UIPI) in the kernel to prevent low-integrity processes from sending malicious messages ("Shatter attacks") to higher-privilege windows. | ✅ **Strict Process Isolation:** The shim's handle table (`g_windows`) and thread message queues (`g_queues`) live in process-local memory (`SRWLOCK` / `ConcurrentDictionary`). Other processes cannot enumerate, message, or hook your process's `HWND`s at all. |
-| **Memory Protection (`W^X` Compliance)** | ✅ Kernel/loader enforced. | ✅ **No executable heap (`PAGE_EXECUTE_READWRITE`) is ever allocated.** IAT patching temporarily sets `PAGE_READWRITE` on a single 4-byte/8-byte data pointer slot in `.rdata`/`.idata`, writes the function pointer atomically, and immediately restores the original `PAGE_READONLY` protection. |
-| **XML Manifest Parsing Security** | ✅ Parsed by `sxssrv.dll` in CSRSS (system-privileged process). | ✅ Parsed in unprivileged user mode via `XmlReader` with `DtdProcessing.Prohibit` and `XmlResolver = null`—completely immune to XXE (XML External Entity), SSRF, and Billion Laughs entity-expansion attacks. |
-| **Host Machine Safety Guard** | N/A | ✅ **Hard-coded fail-safe:** The very first line of `wmain` in `install_sta_shim.cpp` checks `GetFileAttributesW(L"C:\\Windows\\System32\\win32u.dll") != INVALID_FILE_ATTRIBUTES`. If `win32u.dll` exists (meaning it is running on a Windows 11/10 developer workstation or Windows Server Core host), it immediately aborts with exit code `1` before touching any file or registry key. |
-
-### 2. Engineering Parity: How Does Our Implementation Compare to Microsoft's Native Subsystems?
-
-Here is the honest, no-marketing comparison of where our SxS and STA replacements are **100% equivalent (or faster)** than Microsoft's native implementation, and the **exact architectural boundaries** you should know:
-
-| Subsystem / Feature | Parity with Native Windows (`sxs.dll` / `win32u.dll`) | Why & Architectural Trade-Offs to Know |
-| :--- | :--- | :--- |
-| **In-Process COM Object Creation & Vtable Calls (`CLSCTX_INPROC_SERVER`)** | **100% Identical (`S_OK`)** | Neither SxS nor our fallback changes how COM objects execute. Once `DllGetClassObject` returns the native `IClassFactory` and `combase.dll` calls `IClassFactory::CreateInstance`, the returned `IUnknown*` / `IDispatch*` pointer, vtable layout, RCW marshaling, and native machine code execution are **100% Microsoft's native `combase.dll` and your native C++/Delphi/VB6 DLL**. |
-| **STA Apartment Serialization & Message Pumping (`COINIT_APARTMENTTHREADED`)** | **100% Compatible & Faster in Ring 3** | For `OleMainThreadWndClass`, `SendMessageW`, `PostMessageW`, `PeekMessageW`, `GetMessageW`, `DispatchMessageW`, `MsgWaitForMultipleObjectsEx`, `SetPropW`/`GetPropW`, and `SetTimer`/`KillTimer`, running in Ring-3 user mode avoids the Ring-3 $\leftrightarrow$ Ring-0 kernel syscall transition overhead on every message pump cycle. |
-| **Scope of Registration-Free Manifest Activation** | **Process-Wide (`CoRegisterClassObject`) vs. Per-Thread (`ActivateActCtx`)** | Native Windows SxS pushes an activation context onto the current thread's `TEB->ActivationContextStackPointer`. Our Nano Server fallback registers the manifest's `IClassFactory` in `combase.dll`'s process-wide class table for the duration of the `ActivationContext` scope. For 99.9% of services, this is identical (or even convenient if worker threads are spawned), unless a single process simultaneously loads *two different versions of the exact same `CLSID`* on two different threads at the exact same millisecond. |
-| **Manifest Elements Supported** | **`<file>` & `<comClass clsid="{...}"/>` (In-Proc COM)** | Our manifest parser specifically targets `<file>` and `<comClass>` for in-process COM activation (`DllGetClassObject`). It does not emulate kernel Win32 assembly binding redirects for non-COM DLLs or `<comInterfaceExternalProxyStub>` custom proxy-stub DLL registration (note: standard `oleaut32.dll` / `IDispatch` / TypeLib automation marshaling still works natively). |
-| **Cross-Thread Synchronous `SendMessageW` & Visible GUI Windows** | **Headless / Same-Thread `SendMessageW` + Cross-Thread `PostMessageW`** | Our user-mode Win32 engine is purposefully built for **headless server workloads** (`HWND_MESSAGE`, STA apartment windows, thread message queues, timers, and window properties). Cross-thread `PostMessageW` / `PostThreadMessageW` + `MsgWaitForMultipleObjectsEx` works across threads via OS event handles, and same-thread `SendMessageW` / `DispatchMessageW` invokes `WNDPROC` directly. It does **not** render visible pixels (GDI/DirectX) or perform cross-process `HWND_BROADCAST`. |
-
----
+- Synthetic windows and message queues are process-local. They are not a security
+  boundary between components in the same process.
+- Hook writes are serialized and restore the original protection. The support
+  table above describes the temporary writable-page behavior; no blanket W^X
+  compliance is claimed.
+- The native build enables Control Flow Guard (`/guard:cf`). This does not prove
+  memory safety or replace security testing.
+- The installer modifies container system DLLs and KnownDLLs. Its host check is a
+  guard, not a sandbox. Build only in disposable Nano Server containers and do
+  not publish a layer after any installer or servicing failure.
+- The manifest fallback belongs to the external managed package. It handles
+  in-process COM `<file>` / `<comClass>` activation, not full SxS assembly binding,
+  and registers factories process-wide rather than using per-thread activation
+  contexts. Validate applications that load competing implementations of one CLSID.
+- Base image tags still float, and downloaded runtime/ANCM payloads do not yet
+  have a pinned hash manifest. The roundtable lists this as separate R21
+  hardening work, not a completed security guarantee.
 
 

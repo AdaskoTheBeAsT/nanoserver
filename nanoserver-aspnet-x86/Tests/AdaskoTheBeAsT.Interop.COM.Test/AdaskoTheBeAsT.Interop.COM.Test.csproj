@@ -30,6 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="..\native\NativeShimRegression.exe" Link="NativeShimRegression.exe" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\native\NativeCOM.dll" Link="NativeCOM.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\native\NativeCOM.manifest" Link="NativeCOM.manifest" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\native\NativeLifetimeProbe.dll" Link="NativeLifetimeProbe.dll" CopyToOutputDirectory="PreserveNewest" />

@@ -1,6 +1,7 @@
 // install_sta_shim.cpp
-// Standalone installer tool that patches PE import tables of combase.dll, user32.dll, and ole32.dll
-// on Windows Nano Server so nanoserver_sta_shim.dll is loaded automatically into processes.
+// Installs nanoserver_sta_shim.dll and patches the user32, ole32, gdi32, and comctl32
+// forwarders on Windows Nano Server, including missing export forwarders. Every required
+// operation and on-disk verification must succeed before installation reports success.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -53,42 +54,198 @@ DWORD ComputePeChecksum(const BYTE* data, size_t size, size_t checksumOffset) {
     return static_cast<DWORD>(sum + size);
 }
 
+bool IsBufferRange(size_t size, size_t offset, size_t length) {
+    return offset <= size && length <= size - offset;
+}
+
+bool ReadFileBuffer(const wchar_t* path, std::vector<BYTE>& bytes) {
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > MAXDWORD) {
+        CloseHandle(file);
+        SetLastError(ERROR_BAD_EXE_FORMAT);
+        return false;
+    }
+    bytes.resize(static_cast<size_t>(size.QuadPart));
+    DWORD read = 0;
+    BOOL success = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+    DWORD error = GetLastError();
+    CloseHandle(file);
+    if (!success || read != bytes.size()) {
+        SetLastError(success ? ERROR_READ_FAULT : error);
+        return false;
+    }
+    return true;
+}
+
+IMAGE_NT_HEADERS* GetPeHeaders(std::vector<BYTE>& bytes) {
+    if (bytes.size() < sizeof(IMAGE_DOS_HEADER)) return nullptr;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0) return nullptr;
+    size_t offset = static_cast<size_t>(dos->e_lfanew);
+    if (!IsBufferRange(bytes.size(), offset, sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD))) return nullptr;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(bytes.data() + offset);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
+    size_t optionalSize = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ? sizeof(IMAGE_OPTIONAL_HEADER32) :
+                          nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC ? sizeof(IMAGE_OPTIONAL_HEADER64) : 0;
+    if (!optionalSize || nt->FileHeader.SizeOfOptionalHeader < optionalSize ||
+        !IsBufferRange(bytes.size(), offset + 24, nt->FileHeader.SizeOfOptionalHeader +
+            static_cast<size_t>(nt->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER))) return nullptr;
+    return nt;
+}
+
+bool ReadPeString(const std::vector<BYTE>& bytes, DWORD offset, std::string& output) {
+    if (!offset || offset >= bytes.size()) return false;
+    const char* start = reinterpret_cast<const char*>(bytes.data() + offset);
+    const char* end = static_cast<const char*>(memchr(start, 0, bytes.size() - offset));
+    if (!end) return false;
+    output.assign(start, end);
+    return true;
+}
+
+bool VerifyFileBytes(const wchar_t* path, const std::vector<BYTE>& expected) {
+    std::vector<BYTE> actual;
+    if (!ReadFileBuffer(path, actual)) return false;
+    if (actual != expected) {
+        SetLastError(ERROR_WRITE_FAULT);
+        return false;
+    }
+    return true;
+}
+
+bool SetFileInformationForRestore(const wchar_t* path, DWORD access, FILE_INFO_BY_HANDLE_CLASS type,
+                                 void* information, DWORD size) {
+    HANDLE file = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    BOOL success = SetFileInformationByHandle(file, type, information, size);
+    DWORD error = GetLastError();
+    if (!success) fwprintf(stderr, L"[ERR] File metadata update failed (class=%d): %s (err=%lu).\n",
+                          static_cast<int>(type), path, error);
+    if (!CloseHandle(file)) {
+        if (success) error = GetLastError();
+        success = FALSE;
+    }
+    if (!success) SetLastError(error);
+    return success != FALSE;
+}
+
+bool SetFileAttributesForRestore(const wchar_t* path, DWORD attributes) {
+    FILE_BASIC_INFO information{};
+    information.FileAttributes = attributes;
+    return SetFileInformationForRestore(path, FILE_WRITE_ATTRIBUTES, FileBasicInfo,
+                                        &information, sizeof(information));
+}
+
+bool DeleteFileForRestore(const wchar_t* path) {
+    FILE_DISPOSITION_INFO information{TRUE};
+    return SetFileInformationForRestore(path, DELETE, FileDispositionInfo,
+                                        &information, sizeof(information));
+}
+
+bool MoveFileForRestore(const wchar_t* source, const wchar_t* destination) {
+    std::wstring target = destination;
+    std::vector<BYTE> buffer(sizeof(FILE_RENAME_INFO) + target.size() * sizeof(wchar_t), 0);
+    auto* information = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    information->ReplaceIfExists = FALSE;
+    // Nano's Win32 rename wrapper rejects a relative name plus RootDirectory.
+    information->FileNameLength = static_cast<DWORD>(target.size() * sizeof(wchar_t));
+    memcpy(information->FileName, target.c_str(), (target.size() + 1) * sizeof(wchar_t));
+    return SetFileInformationForRestore(source, DELETE, FileRenameInfo,
+                                        information, static_cast<DWORD>(buffer.size()));
+}
+
+bool WriteNewFileBuffer(const wchar_t* path, const std::vector<BYTE>& bytes) {
+    // Enabling SeRestorePrivilege is not enough: protected Nano directories also
+    // require backup intent on the file and metadata handles. Keep their ACLs intact.
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    LARGE_INTEGER size{};
+    BOOL success = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
+    DWORD error = success ? ERROR_WRITE_FAULT : GetLastError();
+    if (success && written == bytes.size()) {
+        success = FlushFileBuffers(file);
+        if (!success) error = GetLastError();
+    } else success = FALSE;
+    if (success) {
+        success = GetFileSizeEx(file, &size);
+        if (!success) error = GetLastError();
+        else if (size.QuadPart != bytes.size()) { success = FALSE; error = ERROR_WRITE_FAULT; }
+    }
+    if (!CloseHandle(file)) { success = FALSE; error = GetLastError(); }
+    if (success && !VerifyFileBytes(path, bytes)) { success = FALSE; error = GetLastError(); }
+    if (!success) {
+        DeleteFileForRestore(path);
+        SetLastError(error);
+    }
+    return success != FALSE;
+}
+
+bool WritePeBufferToFile(const wchar_t* path, std::vector<BYTE>& bytes, size_t checksumOffset) {
+    if (checksumOffset != SIZE_MAX) {
+        if (!IsBufferRange(bytes.size(), checksumOffset, sizeof(DWORD))) return false;
+        *reinterpret_cast<DWORD*>(bytes.data() + checksumOffset) = ComputePeChecksum(bytes.data(), bytes.size(), checksumOffset);
+    }
+    std::wstring staged = std::wstring(path) + L".new";
+    std::wstring backup = std::wstring(path) + L".orig";
+    if (GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        fwprintf(stderr, L"[ERR] Backup already exists; preserving it: %s\n", backup.c_str());
+        SetLastError(ERROR_ALREADY_EXISTS);
+        return false;
+    }
+    if (!WriteNewFileBuffer(staged.c_str(), bytes)) return false;
+    DWORD error = ERROR_SUCCESS;
+    DWORD attributes = GetFileAttributesW(path);
+    DWORD writableAttributes = attributes & ~FILE_ATTRIBUTE_READONLY;
+    if (!writableAttributes) writableAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        !SetFileAttributesForRestore(path, writableAttributes) ||
+        !MoveFileForRestore(path, backup.c_str())) {
+        error = GetLastError();
+        DeleteFileForRestore(staged.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES) SetFileAttributesForRestore(path, attributes);
+        SetLastError(error);
+        return false;
+    }
+    if (!MoveFileForRestore(staged.c_str(), path)) {
+        error = GetLastError();
+        if (!MoveFileForRestore(backup.c_str(), path)) {
+            fwprintf(stderr, L"[ERR] Rollback failed; untouched original remains at %s (err=%lu).\n", backup.c_str(), GetLastError());
+        } else {
+            SetFileAttributesForRestore(path, attributes);
+        }
+        DeleteFileForRestore(staged.c_str());
+        SetLastError(error);
+        return false;
+    }
+    if (!VerifyFileBytes(path, bytes)) {
+        error = GetLastError();
+        if (!MoveFileForRestore(path, staged.c_str()) ||
+            !MoveFileForRestore(backup.c_str(), path)) {
+            fwprintf(stderr, L"[ERR] Verification rollback failed; original is at %s.\n", backup.c_str());
+        } else {
+            SetFileAttributesForRestore(path, attributes);
+            DeleteFileForRestore(staged.c_str());
+        }
+        SetLastError(error);
+        return false;
+    }
+    if (!SetFileAttributesForRestore(path, attributes) || !DeleteFileForRestore(backup.c_str())) return false;
+    return true;
+}
 bool PatchPeFileImports(const wchar_t* filePath) {
-    HANDLE hFile = CreateFileW(
-        filePath,
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        wprintf(L"[SKIP] File not found: %s\n", filePath);
+    std::vector<BYTE> buf;
+    if (!ReadFileBuffer(filePath, buf)) return false;
+    auto* nt = GetPeHeaders(buf);
+    if (!nt) {
+        SetLastError(ERROR_BAD_EXE_FORMAT);
         return false;
     }
-
-    DWORD fileSize = GetFileSize(hFile, nullptr);
-    if (fileSize == INVALID_FILE_SIZE || fileSize < 512) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    std::vector<BYTE> buf(fileSize);
-    DWORD bytesRead = 0;
-    if (!ReadFile(hFile, buf.data(), fileSize, &bytesRead, nullptr) || bytesRead != fileSize) {
-        CloseHandle(hFile);
-        return false;
-    }
-    CloseHandle(hFile);
-
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(buf.data());
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        return false;
-    }
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(buf.data() + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) {
-        return false;
-    }
 
     WORD magic = *reinterpret_cast<WORD*>(&nt->OptionalHeader.Magic);
     DWORD impRva = 0;
@@ -121,18 +278,19 @@ bool PatchPeFileImports(const wchar_t* filePath) {
     }
 
     bool modified = false;
-    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(buf.data() + impOff);
-    for (; desc->Name != 0 || desc->FirstThunk != 0; ++desc) {
+    for (size_t offset = impOff; ; offset += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+        if (!IsBufferRange(buf.size(), offset, sizeof(IMAGE_IMPORT_DESCRIPTOR))) return false;
+        auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(buf.data() + offset);
+        if (!desc->Name && !desc->FirstThunk) break;
         DWORD nameOff = RvaToOffset(nt, nt->FileHeader.NumberOfSections, desc->Name);
-        if (nameOff == 0 || nameOff + 36 > buf.size()) {
-            continue;
-        }
+        std::string name;
+        if (!ReadPeString(buf, nameOff, name)) return false;
         char* dllName = reinterpret_cast<char*>(buf.data() + nameOff);
-        if (_stricmp(dllName, "api-ms-win-core-apiquery-l1-1-0.dll") == 0 ||
-            _stricmp(dllName, "api-ms-win-core-apiquery-l1-1-1.dll") == 0 ||
-            _stricmp(dllName, "nanoserver_sta_shim.dll") == 0) {
+        if (_stricmp(name.c_str(), "api-ms-win-core-apiquery-l1-1-0.dll") == 0 ||
+            _stricmp(name.c_str(), "api-ms-win-core-apiquery-l1-1-1.dll") == 0 ||
+            _stricmp(name.c_str(), "nanoserver_sta_shim.dll") == 0) {
             const char* replacement = "nanoserver_sta_shim.dll";
-            size_t origLen = strlen(dllName);
+            size_t origLen = name.size();
             size_t repLen = strlen(replacement);
             memset(dllName, 0, origLen + 1);
             memcpy(dllName, replacement, repLen + 1);
@@ -145,66 +303,7 @@ bool PatchPeFileImports(const wchar_t* filePath) {
         return false;
     }
 
-    DWORD newChecksum = ComputePeChecksum(buf.data(), buf.size(), checksumOffset);
-    *reinterpret_cast<DWORD*>(buf.data() + checksumOffset) = newChecksum;
-
-    SetFileAttributesW(filePath, FILE_ATTRIBUTE_NORMAL);
-    HANDLE hDirect = CreateFileW(
-        filePath,
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr);
-    if (hDirect != INVALID_HANDLE_VALUE) {
-        DWORD bytesWritten = 0;
-        BOOL writeOk = WriteFile(hDirect, buf.data(), static_cast<DWORD>(buf.size()), &bytesWritten, nullptr);
-        CloseHandle(hDirect);
-        if (writeOk && bytesWritten == buf.size()) {
-            wprintf(L"[OK] Patched imports in: %s\n", filePath);
-            return true;
-        }
-    }
-
-    std::wstring tmpPath = std::wstring(filePath) + L".new";
-    std::wstring bakPath = std::wstring(filePath) + L".orig";
-
-    HANDLE hOut = CreateFileW(
-        tmpPath.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr);
-    if (hOut == INVALID_HANDLE_VALUE) {
-        wprintf(L"[ERR] Cannot create temp file: %s (err=%lu)\n", tmpPath.c_str(), GetLastError());
-        return false;
-    }
-    DWORD bytesWritten = 0;
-    BOOL writeOk = WriteFile(hOut, buf.data(), static_cast<DWORD>(buf.size()), &bytesWritten, nullptr);
-    CloseHandle(hOut);
-    if (!writeOk || bytesWritten != buf.size()) {
-        DeleteFileW(tmpPath.c_str());
-        return false;
-    }
-
-    // Save backup if not already saved, or move current file aside if locked
-    DeleteFileW(bakPath.c_str());
-    if (!MoveFileExW(filePath, bakPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        wprintf(L"[ERR] Cannot move original: %s (err=%lu)\n", filePath, GetLastError());
-        DeleteFileW(tmpPath.c_str());
-        return false;
-    }
-    if (!MoveFileExW(tmpPath.c_str(), filePath, MOVEFILE_REPLACE_EXISTING)) {
-        MoveFileExW(bakPath.c_str(), filePath, MOVEFILE_REPLACE_EXISTING);
-        wprintf(L"[ERR] Cannot replace with patched: %s (err=%lu)\n", filePath, GetLastError());
-        return false;
-    }
-    // Try to remove .orig (if not in use)
-    DeleteFileW(bakPath.c_str());
-
+    if (!WritePeBufferToFile(filePath, buf, checksumOffset)) return false;
     wprintf(L"[OK] Patched imports in: %s\n", filePath);
     return true;
 }
@@ -219,106 +318,19 @@ struct ForwarderFixup {
     std::string Target;
 };
 
-bool WritePeBufferToFile(const wchar_t* filePath, std::vector<BYTE>& buf, size_t checksumOffset) {
-    DWORD newChecksum = ComputePeChecksum(buf.data(), buf.size(), checksumOffset);
-    *reinterpret_cast<DWORD*>(buf.data() + checksumOffset) = newChecksum;
-
-    SetFileAttributesW(filePath, FILE_ATTRIBUTE_NORMAL);
-    HANDLE hDirect = CreateFileW(
-        filePath,
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr);
-    if (hDirect != INVALID_HANDLE_VALUE) {
-        DWORD bytesWritten = 0;
-        BOOL writeOk = WriteFile(hDirect, buf.data(), static_cast<DWORD>(buf.size()), &bytesWritten, nullptr);
-        CloseHandle(hDirect);
-        if (writeOk && bytesWritten == buf.size()) {
-            return true;
-        }
-    }
-
-    std::wstring tmpPath = std::wstring(filePath) + L".new";
-    std::wstring bakPath = std::wstring(filePath) + L".orig";
-
-    HANDLE hOut = CreateFileW(
-        tmpPath.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr);
-    if (hOut == INVALID_HANDLE_VALUE) {
-        wprintf(L"[ERR] Cannot create temp file: %s (err=%lu)\n", tmpPath.c_str(), GetLastError());
-        return false;
-    }
-    DWORD bytesWritten = 0;
-    BOOL writeOk = WriteFile(hOut, buf.data(), static_cast<DWORD>(buf.size()), &bytesWritten, nullptr);
-    CloseHandle(hOut);
-    if (!writeOk || bytesWritten != buf.size()) {
-        DeleteFileW(tmpPath.c_str());
-        return false;
-    }
-
-    DeleteFileW(bakPath.c_str());
-    if (!MoveFileExW(filePath, bakPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        wprintf(L"[ERR] Cannot move original: %s (err=%lu)\n", filePath, GetLastError());
-        DeleteFileW(tmpPath.c_str());
-        return false;
-    }
-    if (!MoveFileExW(tmpPath.c_str(), filePath, MOVEFILE_REPLACE_EXISTING)) {
-        MoveFileExW(bakPath.c_str(), filePath, MOVEFILE_REPLACE_EXISTING);
-        wprintf(L"[ERR] Cannot replace with patched: %s (err=%lu)\n", filePath, GetLastError());
-        return false;
-    }
-    DeleteFileW(bakPath.c_str());
-    return true;
-}
-
 bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>& missingExports) {
     if (missingExports.empty()) {
         return true;
     }
 
-    HANDLE hFile = CreateFileW(
-        filePath,
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        wprintf(L"[SKIP] File not found for export patch: %s\n", filePath);
+    std::vector<BYTE> buf;
+    if (!ReadFileBuffer(filePath, buf)) return false;
+    auto* nt = GetPeHeaders(buf);
+    if (!nt) {
+        SetLastError(ERROR_BAD_EXE_FORMAT);
         return false;
     }
-
-    DWORD fileSize = GetFileSize(hFile, nullptr);
-    if (fileSize == INVALID_FILE_SIZE || fileSize < 512) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    std::vector<BYTE> buf(fileSize);
-    DWORD bytesRead = 0;
-    if (!ReadFile(hFile, buf.data(), fileSize, &bytesRead, nullptr) || bytesRead != fileSize) {
-        CloseHandle(hFile);
-        return false;
-    }
-    CloseHandle(hFile);
-
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(buf.data());
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        return false;
-    }
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(buf.data() + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) {
-        return false;
-    }
 
     WORD magic = *reinterpret_cast<WORD*>(&nt->OptionalHeader.Magic);
     DWORD expRva = 0;
@@ -364,8 +376,12 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
     if (funcsOff == 0 || namesOff == 0 || ordsOff == 0 || dllNameOff == 0) {
         return false;
     }
-
-    std::string dllNameStr(reinterpret_cast<const char*>(buf.data() + dllNameOff));
+    if (!IsBufferRange(buf.size(), funcsOff, static_cast<size_t>(origExpDir.NumberOfFunctions) * sizeof(DWORD)) ||
+        !IsBufferRange(buf.size(), namesOff, static_cast<size_t>(origExpDir.NumberOfNames) * sizeof(DWORD)) ||
+        !IsBufferRange(buf.size(), ordsOff, static_cast<size_t>(origExpDir.NumberOfNames) * sizeof(WORD)) ||
+        origExpDir.NumberOfFunctions > 0xFFFFu) return false;
+    std::string dllNameStr;
+    if (!ReadPeString(buf, dllNameOff, dllNameStr)) return false;
     const DWORD* origFuncs = reinterpret_cast<const DWORD*>(buf.data() + funcsOff);
     const DWORD* origNames = reinterpret_cast<const DWORD*>(buf.data() + namesOff);
     const WORD* origOrds = reinterpret_cast<const WORD*>(buf.data() + ordsOff);
@@ -376,12 +392,9 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
 
     for (DWORD i = 0; i < origExpDir.NumberOfNames; ++i) {
         DWORD nameOff = RvaToOffset(nt, numSections, origNames[i]);
-        if (nameOff == 0 || nameOff >= buf.size()) {
-            return false;
-        }
-        namedExports.push_back(NamedExportEntry{
-            std::string(reinterpret_cast<const char*>(buf.data() + nameOff)),
-            origOrds[i]});
+        std::string name;
+        if (!ReadPeString(buf, nameOff, name) || origOrds[i] >= origExpDir.NumberOfFunctions) return false;
+        namedExports.push_back(NamedExportEntry{name, origOrds[i]});
     }
 
     std::vector<ForwarderFixup> forwarderFixups;
@@ -389,11 +402,9 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
         DWORD fnRva = origFuncs[i];
         if (fnRva >= expRva && fnRva < expRva + expSize) {
             DWORD fwdOff = RvaToOffset(nt, numSections, fnRva);
-            if (fwdOff != 0 && fwdOff < buf.size()) {
-                forwarderFixups.push_back(ForwarderFixup{
-                    static_cast<WORD>(i),
-                    std::string(reinterpret_cast<const char*>(buf.data() + fwdOff))});
-            }
+            std::string target;
+            if (!ReadPeString(buf, fwdOff, target)) return false;
+            forwarderFixups.push_back(ForwarderFixup{static_cast<WORD>(i), target});
         }
     }
 
@@ -407,6 +418,7 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
             }
         }
         if (!exists) {
+            if (newFunctions.size() >= 0x10000u) return false;
             WORD newOrdIdx = static_cast<WORD>(newFunctions.size());
             newFunctions.push_back(0);
             namedExports.push_back(NamedExportEntry{std::string(missingName), newOrdIdx});
@@ -557,68 +569,178 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
     return true;
 }
 
-void EnablePrivilege(LPCWSTR privName) {
-    HANDLE hToken = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
-        return;
+bool EnablePrivilege(LPCWSTR name) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    bool success = LookupPrivilegeValueW(nullptr, name, &privileges.Privileges[0].Luid) != FALSE;
+    if (success) {
+        SetLastError(ERROR_SUCCESS);
+        success = AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), nullptr, nullptr) &&
+                  GetLastError() == ERROR_SUCCESS;
     }
-    TOKEN_PRIVILEGES tp = {};
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    if (LookupPrivilegeValueW(nullptr, privName, &tp.Privileges[0].Luid)) {
-        AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr);
-    }
-    CloseHandle(hToken);
+    DWORD error = GetLastError();
+    CloseHandle(token);
+    SetLastError(error);
+    return success;
 }
 
-void RemoveKnownDllEntries() {
-    HKEY hKey = nullptr;
-    LSTATUS status = RegOpenKeyExW(
-        HKEY_LOCAL_MACHINE,
-        L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDLLs",
-        REG_OPTION_BACKUP_RESTORE,
-        KEY_SET_VALUE,
-        &hKey);
+bool OpenKnownDlls(HKEY* key) {
+    const wchar_t* path = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDLLs";
+    HKEY existing = nullptr;
+    LSTATUS status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ | KEY_WOW64_64KEY, &existing);
+    if (status == ERROR_SUCCESS) status = RegCloseKey(existing);
     if (status == ERROR_SUCCESS) {
-        RegDeleteValueW(hKey, L"user32");
-        RegDeleteValueW(hKey, L"ole32");
-        RegDeleteValueW(hKey, L"gdi32");
-        RegCloseKey(hKey);
-        wprintf(L"[OK] Updated KnownDLLs registry key.\n");
-    } else {
-        wprintf(L"[WARN] Could not open KnownDLLs registry key (status=%ld).\n", status);
+        // This protected key requires the enabled backup/restore privileges.
+        // RegCreateKeyEx documents REG_OPTION_BACKUP_RESTORE; RegOpenKeyEx does not.
+        status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, nullptr, REG_OPTION_BACKUP_RESTORE,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr, key, nullptr);
     }
+    if (status != ERROR_SUCCESS) {
+        SetLastError(status);
+        return false;
+    }
+    return true;
 }
 
-void CopyForwardersIfMissing(const wchar_t* sysDir) {
-    std::wstring pattern = std::wstring(sysDir) + L"\\forwarders\\*.dll";
-    WIN32_FIND_DATAW fd = {};
-    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
-    if (hFind == INVALID_HANDLE_VALUE) {
-        return;
+bool RemoveKnownDllEntries() {
+    HKEY key = nullptr;
+    if (!OpenKnownDlls(&key)) return false;
+    for (const wchar_t* name : {L"user32", L"ole32", L"gdi32"}) {
+        LSTATUS status = RegDeleteValueW(key, name);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
+            RegCloseKey(key);
+            SetLastError(status);
+            return false;
+        }
     }
-    int copied = 0;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            continue;
-        }
-        std::wstring src = std::wstring(sysDir) + L"\\forwarders\\" + fd.cFileName;
-        std::wstring dst = std::wstring(sysDir) + L"\\" + fd.cFileName;
-        if (CopyFileW(src.c_str(), dst.c_str(), TRUE)) {
-            ++copied;
-        }
-    } while (FindNextFileW(hFind, &fd));
-    FindClose(hFind);
-    wprintf(L"[OK] Copied %d forwarder DLLs into %s\n", copied, sysDir);
+    LSTATUS status = RegCloseKey(key);
+    if (status != ERROR_SUCCESS) {
+        SetLastError(status);
+        return false;
+    }
+    wprintf(L"[OK] Updated KnownDLLs registry key.\n");
+    return true;
 }
 
-void CopyShimDll(const wchar_t* srcShim, const wchar_t* sysDir) {
-    std::wstring dstMain = std::wstring(sysDir) + L"\\nanoserver_sta_shim.dll";
-    std::wstring dstFwd = std::wstring(sysDir) + L"\\forwarders\\nanoserver_sta_shim.dll";
-    if (CopyFileW(srcShim, dstMain.c_str(), FALSE)) {
-        wprintf(L"[OK] Installed %s\n", dstMain.c_str());
+bool CopyRequiredFile(const std::wstring& source, const std::wstring& destination) {
+    std::vector<BYTE> expected;
+    if (!ReadFileBuffer(source.c_str(), expected)) return false;
+    std::vector<BYTE> existing;
+    bool exists = GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (exists && ReadFileBuffer(destination.c_str(), existing) && existing == expected) return true;
+    bool copied = exists ? WritePeBufferToFile(destination.c_str(), expected, SIZE_MAX) :
+        WriteNewFileBuffer(destination.c_str(), expected);
+    if (!copied || !VerifyFileBytes(destination.c_str(), expected)) {
+        fwprintf(stderr, L"[ERR] Copy failed: %s -> %s (err=%lu)\n", source.c_str(), destination.c_str(), GetLastError());
+        return false;
     }
-    CopyFileW(srcShim, dstFwd.c_str(), FALSE);
+    return true;
+}
+
+const std::vector<const char*> kGdi32Exports = {
+    "CopyEnhMetaFileA", "CreatePenIndirect", "GetTextExtentPoint32A", "SetWinMetaFileBits"
+};
+const std::vector<const char*> kUser32Exports = {
+    "CreateIcon", "GetKeyNameTextA", "GetClassInfoW", "GetClassInfoExW", "CallWindowProcW"
+};
+const std::vector<const char*> kComctl32Exports = {"ImageList_GetIconSize", "ImageList_SetIconSize"};
+const std::vector<const char*> kNoExports;
+
+const std::vector<const char*>& RequiredExports(const std::wstring& name) {
+    if (name == L"user32.dll") return kUser32Exports;
+    if (name == L"gdi32.dll") return kGdi32Exports;
+    if (name == L"comctl32.dll") return kComctl32Exports;
+    return kNoExports;
+}
+
+bool VerifyPatchedPe(const wchar_t* path, const std::vector<const char*>& requiredExports) {
+    std::vector<BYTE> bytes;
+    if (!ReadFileBuffer(path, bytes)) return false;
+    auto* nt = GetPeHeaders(bytes);
+    if (!nt) return false;
+    const auto* directories = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ?
+        reinterpret_cast<IMAGE_NT_HEADERS32*>(nt)->OptionalHeader.DataDirectory :
+        reinterpret_cast<IMAGE_NT_HEADERS64*>(nt)->OptionalHeader.DataDirectory;
+    DWORD offset = RvaToOffset(nt, nt->FileHeader.NumberOfSections, directories[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+    bool foundImport = false;
+    while (offset && IsBufferRange(bytes.size(), offset, sizeof(IMAGE_IMPORT_DESCRIPTOR))) {
+        const auto* descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(bytes.data() + offset);
+        if (!descriptor->Name && !descriptor->FirstThunk) break;
+        std::string name;
+        if (!ReadPeString(bytes, RvaToOffset(nt, nt->FileHeader.NumberOfSections, descriptor->Name), name)) return false;
+        foundImport = foundImport || _stricmp(name.c_str(), "nanoserver_sta_shim.dll") == 0;
+        offset += sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    }
+    if (!foundImport) return false;
+    if (requiredExports.empty()) return true;
+    DWORD exportOffset = RvaToOffset(nt, nt->FileHeader.NumberOfSections,
+        directories[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+    if (!exportOffset || !IsBufferRange(bytes.size(), exportOffset, sizeof(IMAGE_EXPORT_DIRECTORY))) return false;
+    const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(bytes.data() + exportOffset);
+    DWORD namesOffset = RvaToOffset(nt, nt->FileHeader.NumberOfSections, exports->AddressOfNames);
+    DWORD ordinalsOffset = RvaToOffset(nt, nt->FileHeader.NumberOfSections, exports->AddressOfNameOrdinals);
+    DWORD functionsOffset = RvaToOffset(nt, nt->FileHeader.NumberOfSections, exports->AddressOfFunctions);
+    if (!namesOffset || !ordinalsOffset || !functionsOffset ||
+        !IsBufferRange(bytes.size(), namesOffset, static_cast<size_t>(exports->NumberOfNames) * sizeof(DWORD)) ||
+        !IsBufferRange(bytes.size(), ordinalsOffset, static_cast<size_t>(exports->NumberOfNames) * sizeof(WORD)) ||
+        !IsBufferRange(bytes.size(), functionsOffset, static_cast<size_t>(exports->NumberOfFunctions) * sizeof(DWORD))) return false;
+    const auto* names = reinterpret_cast<const DWORD*>(bytes.data() + namesOffset);
+    const auto* ordinals = reinterpret_cast<const WORD*>(bytes.data() + ordinalsOffset);
+    const auto* functions = reinterpret_cast<const DWORD*>(bytes.data() + functionsOffset);
+    for (const char* required : requiredExports) {
+        bool found = false;
+        for (DWORD i = 0; i < exports->NumberOfNames; ++i) {
+            std::string name;
+            if (!ReadPeString(bytes, RvaToOffset(nt, nt->FileHeader.NumberOfSections, names[i]), name)) return false;
+            if (name == required) {
+                if (ordinals[i] >= exports->NumberOfFunctions || functions[ordinals[i]] == 0) return false;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+bool PreflightPe(const std::wstring& path, WORD machine) {
+    std::vector<BYTE> bytes;
+    if (ReadFileBuffer(path.c_str(), bytes)) {
+        auto* headers = GetPeHeaders(bytes);
+        if (headers && headers->FileHeader.Machine == machine) return true;
+        SetLastError(ERROR_BAD_EXE_FORMAT);
+    }
+    fwprintf(stderr, L"[ERR] Missing or invalid required PE: %s (err=%lu)\n", path.c_str(), GetLastError());
+    return false;
+}
+
+bool PreflightArchitecture(const std::wstring& payload, const std::wstring& systemDirectory, WORD machine) {
+    if (!PreflightPe(payload, machine)) return false;
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll"}) {
+        if (!PreflightPe(systemDirectory + L"\\forwarders\\" + name, machine)) return false;
+    }
+    return true;
+}
+
+bool InstallArchitecture(const std::wstring& payload, const std::wstring& systemDirectory) {
+    if (!CopyRequiredFile(payload, systemDirectory + L"\\nanoserver_sta_shim.dll") ||
+        !CopyRequiredFile(payload, systemDirectory + L"\\forwarders\\nanoserver_sta_shim.dll")) return false;
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll"}) {
+        std::wstring forwarder = systemDirectory + L"\\forwarders\\" + name;
+        const auto& exports = RequiredExports(name);
+        if (!PatchPeFileImports(forwarder.c_str()) || !PatchPeFileExports(forwarder.c_str(), exports) ||
+            !VerifyPatchedPe(forwarder.c_str(), exports) ||
+            !CopyRequiredFile(forwarder, systemDirectory + L"\\" + name) ||
+            !VerifyPatchedPe((systemDirectory + L"\\" + name).c_str(), exports)) {
+            fwprintf(stderr, L"[ERR] Required patch or verification failed: %s (err=%lu)\n", forwarder.c_str(), GetLastError());
+            return false;
+        }
+    }
+    wprintf(L"[OK] Installed and verified shim in %s\n", systemDirectory.c_str());
+    return true;
 }
 
 } // namespace
@@ -628,71 +750,50 @@ int wmain(int argc, wchar_t* argv[]) {
         fwprintf(stderr, L"[ABORT] win32u.dll detected in System32. Refusing to run on a non-Nano-Server host OS.\n");
         return 1;
     }
-
-    EnablePrivilege(L"SeBackupPrivilege");
-    EnablePrivilege(L"SeRestorePrivilege");
-    EnablePrivilege(L"SeTakeOwnershipPrivilege");
-
-    wchar_t exeDir[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
-    if (lastSlash) {
-        *lastSlash = L'\0';
+    wchar_t executable[MAX_PATH]{};
+    DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+    if (!length || length >= MAX_PATH) return 1;
+    wchar_t* slash = wcsrchr(executable, L'\\');
+    if (!slash) return 1;
+    *slash = L'\0';
+    std::wstring baseDirectory = executable;
+    bool requireWow64 = false;
+    bool hasBaseDirectory = false;
+    for (int i = 1; i < argc; ++i) {
+        if (_wcsicmp(argv[i], L"--require-wow64") == 0 || _wcsicmp(argv[i], L"/require-x86") == 0) {
+            requireWow64 = true;
+        } else if (!hasBaseDirectory && argv[i][0] != L'-' && argv[i][0] != L'/') {
+            baseDirectory = argv[i];
+            hasBaseDirectory = true;
+        } else {
+            fwprintf(stderr, L"Usage: install_sta_shim.exe [payload-directory] [--require-wow64 | /require-x86]\n");
+            return 2;
+        }
     }
-    const wchar_t* baseDir = (argc > 1) ? argv[1] : exeDir;
-
-    std::wstring shim64 = std::wstring(baseDir) + L"\\nanoserver_sta_shim_x64.dll";
-    std::wstring shim86 = std::wstring(baseDir) + L"\\nanoserver_sta_shim_x86.dll";
-
-    RemoveKnownDllEntries();
-
-    const std::vector<const char*> kGdi32MissingExports = {
-        "CopyEnhMetaFileA",
-        "CreatePenIndirect",
-        "GetTextExtentPoint32A",
-        "SetWinMetaFileBits",
-    };
-    const std::vector<const char*> kUser32MissingExports = {
-        "CreateIcon",
-        "GetKeyNameTextA",
-    };
-    const std::vector<const char*> kComctl32MissingExports = {
-        "ImageList_GetIconSize",
-        "ImageList_SetIconSize",
-    };
-
-    const wchar_t* sys32 = L"C:\\Windows\\System32";
-    if (GetFileAttributesW(sys32) != INVALID_FILE_ATTRIBUTES) {
-        CopyShimDll(shim64.c_str(), sys32);
-        PatchPeFileImports(L"C:\\Windows\\System32\\forwarders\\user32.dll");
-        PatchPeFileImports(L"C:\\Windows\\System32\\forwarders\\ole32.dll");
-        PatchPeFileImports(L"C:\\Windows\\System32\\forwarders\\gdi32.dll");
-        PatchPeFileImports(L"C:\\Windows\\System32\\forwarders\\comctl32.dll");
-        PatchPeFileExports(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", kGdi32MissingExports);
-        PatchPeFileExports(L"C:\\Windows\\System32\\forwarders\\user32.dll", kUser32MissingExports);
-        PatchPeFileExports(L"C:\\Windows\\System32\\forwarders\\comctl32.dll", kComctl32MissingExports);
-        CopyFileW(L"C:\\Windows\\System32\\forwarders\\user32.dll", L"C:\\Windows\\System32\\user32.dll", FALSE);
-        CopyFileW(L"C:\\Windows\\System32\\forwarders\\ole32.dll", L"C:\\Windows\\System32\\ole32.dll", FALSE);
-        CopyFileW(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", L"C:\\Windows\\System32\\gdi32.dll", FALSE);
-        CopyFileW(L"C:\\Windows\\System32\\forwarders\\comctl32.dll", L"C:\\Windows\\System32\\comctl32.dll", FALSE);
+    std::wstring shim64 = baseDirectory + L"\\nanoserver_sta_shim_x64.dll";
+    std::wstring shim86 = baseDirectory + L"\\nanoserver_sta_shim_x86.dll";
+    const std::wstring system32 = L"C:\\Windows\\System32";
+    const std::wstring wow64 = L"C:\\Windows\\SysWOW64";
+    DWORD wowAttributes = GetFileAttributesW((wow64 + L"\\forwarders").c_str());
+    bool installWow64 = requireWow64 || (wowAttributes != INVALID_FILE_ATTRIBUTES && (wowAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    // Complete all architecture preflights before touching a system file or registry value.
+    if (!PreflightArchitecture(shim64, system32, IMAGE_FILE_MACHINE_AMD64) ||
+        (installWow64 && !PreflightArchitecture(shim86, wow64, IMAGE_FILE_MACHINE_I386))) return 1;
+    if (!EnablePrivilege(L"SeBackupPrivilege") || !EnablePrivilege(L"SeRestorePrivilege")) {
+        fwprintf(stderr, L"[ERR] Cannot enable installer privileges (err=%lu).\n", GetLastError());
+        return 1;
     }
-
-    const wchar_t* sysWow64 = L"C:\\Windows\\SysWOW64";
-    const wchar_t* sysWow64Fwd = L"C:\\Windows\\SysWOW64\\forwarders";
-    if (GetFileAttributesW(sysWow64Fwd) != INVALID_FILE_ATTRIBUTES) {
-        CopyShimDll(shim86.c_str(), sysWow64);
-        PatchPeFileImports(L"C:\\Windows\\SysWOW64\\forwarders\\user32.dll");
-        PatchPeFileImports(L"C:\\Windows\\SysWOW64\\forwarders\\ole32.dll");
-        PatchPeFileImports(L"C:\\Windows\\SysWOW64\\forwarders\\gdi32.dll");
-        PatchPeFileImports(L"C:\\Windows\\SysWOW64\\forwarders\\comctl32.dll");
-        PatchPeFileExports(L"C:\\Windows\\SysWOW64\\forwarders\\gdi32.dll", kGdi32MissingExports);
-        PatchPeFileExports(L"C:\\Windows\\SysWOW64\\forwarders\\user32.dll", kUser32MissingExports);
-        PatchPeFileExports(L"C:\\Windows\\SysWOW64\\forwarders\\comctl32.dll", kComctl32MissingExports);
-        CopyFileW(L"C:\\Windows\\SysWOW64\\forwarders\\user32.dll", L"C:\\Windows\\SysWOW64\\user32.dll", FALSE);
-        CopyFileW(L"C:\\Windows\\SysWOW64\\forwarders\\ole32.dll", L"C:\\Windows\\SysWOW64\\ole32.dll", FALSE);
-        CopyFileW(L"C:\\Windows\\SysWOW64\\forwarders\\gdi32.dll", L"C:\\Windows\\SysWOW64\\gdi32.dll", FALSE);
-        CopyFileW(L"C:\\Windows\\SysWOW64\\forwarders\\comctl32.dll", L"C:\\Windows\\SysWOW64\\comctl32.dll", FALSE);
+    HKEY key = nullptr;
+    if (!OpenKnownDlls(&key)) {
+        fwprintf(stderr, L"[ERR] Cannot open KnownDLLs before installation (err=%lu).\n", GetLastError());
+        return 1;
     }
-
+    if (RegCloseKey(key) != ERROR_SUCCESS) return 1;
+    if (!InstallArchitecture(shim64, system32) || (installWow64 && !InstallArchitecture(shim86, wow64))) return 1;
+    if (!installWow64) wprintf(L"[OK] WOW64 not requested or present; installing x64 only.\n");
+    if (!RemoveKnownDllEntries()) {
+        fwprintf(stderr, L"[ERR] Cannot update KnownDLLs (err=%lu).\n", GetLastError());
+        return 1;
+    }
     return 0;
 }
