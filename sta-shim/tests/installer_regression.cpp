@@ -394,9 +394,13 @@ int main() {
     auto installed = files;
     Check("R02_repeat_install", Install() == 0 && files.size() == installed.size() && !liveTruncated);
     Check("R02_verified_PE32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\user32.dll", kUser32Exports));
+    Check("R02_verified_PE32_ole32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\ole32.dll", kOle32Exports));
     Check("R02_verified_PE64_exports", VerifyPatchedPe(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", kGdi32Exports));
     files[L"C:\\Windows\\System32\\forwarders\\gdi32.dll"].Bytes[0] = 0;
     Check("R02_verification_rejects_corruption", !VerifyPatchedPe(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", kGdi32Exports));
+    Reset();
+    files[L"C:\\payload\\msvbvm60.dll"] = {Fixture(IMAGE_FILE_MACHINE_I386)};
+    Check("R02_optional_vb6_runtime_copied", Install() == 0 && files.count(L"C:\\Windows\\SysWOW64\\msvbvm60.dll") == 1);
     Reset();
     const wchar_t* target = L"C:\\Windows\\System32\\forwarders\\user32.dll";
     original = files[target].Bytes;

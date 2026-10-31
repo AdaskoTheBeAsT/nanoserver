@@ -641,10 +641,25 @@ bool CopyRequiredFile(const std::wstring& source, const std::wstring& destinatio
 }
 
 const std::vector<const char*> kGdi32Exports = {
-    "CopyEnhMetaFileA", "CreatePenIndirect", "GetTextExtentPoint32A", "SetWinMetaFileBits"
+    "CopyEnhMetaFileA", "CreatePenIndirect", "GetTextExtentPoint32A", "SetWinMetaFileBits",
+    "CopyMetaFileA", "CreateBitmapIndirect", "CreateDiscardableBitmap", "CreateEllipticRgnIndirect",
+    "CreateHalftonePalette", "CreateICA", "CreatePolygonRgn", "EnumFontsA",
+    "Escape", "GetBrushOrgEx", "GetNearestColor", "GetTextExtentPointA",
+    "Pie", "PtInRegion", "ResetDCA", "RoundRect",
+    "ScaleViewportExtEx", "ScaleWindowExtEx", "SetAbortProc", "SetBrushOrgEx",
+    "SetPixelV", "SetWindowOrgEx", "UnrealizeObject", "WidenPath"
 };
 const std::vector<const char*> kUser32Exports = {
-    "CreateIcon", "GetKeyNameTextA", "GetClassInfoW", "GetClassInfoExW", "CallWindowProcW"
+    "CreateIcon", "GetKeyNameTextA", "GetClassInfoW", "GetClassInfoExW", "CallWindowProcW",
+    "DdeAccessData", "DdeClientTransaction", "DdeCmpStringHandles", "DdeConnect",
+    "DdeCreateDataHandle", "DdeCreateStringHandleA", "DdeDisconnect", "DdeFreeDataHandle",
+    "DdeFreeStringHandle", "DdeGetData", "DdeGetLastError", "DdeInitializeA",
+    "DdeNameService", "DdePostAdvise", "DdeQueryConvInfo", "DdeQueryStringA",
+    "DdeSetUserHandle", "DdeUninitialize"
+};
+const std::vector<const char*> kOle32Exports = {
+    "CoIsOle1Class", "OleConvertIStorageToOLESTREAM", "OleConvertOLESTREAMToIStorage",
+    "OleCreateLink", "OleDoAutoConvert"
 };
 const std::vector<const char*> kComctl32Exports = {"ImageList_GetIconSize", "ImageList_SetIconSize"};
 const std::vector<const char*> kNoExports;
@@ -652,6 +667,7 @@ const std::vector<const char*> kNoExports;
 const std::vector<const char*>& RequiredExports(const std::wstring& name) {
     if (name == L"user32.dll") return kUser32Exports;
     if (name == L"gdi32.dll") return kGdi32Exports;
+    if (name == L"ole32.dll") return kOle32Exports;
     if (name == L"comctl32.dll") return kComctl32Exports;
     return kNoExports;
 }
@@ -772,13 +788,17 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     std::wstring shim64 = baseDirectory + L"\\nanoserver_sta_shim_x64.dll";
     std::wstring shim86 = baseDirectory + L"\\nanoserver_sta_shim_x86.dll";
+    std::wstring vb6Runtime = baseDirectory + L"\\msvbvm60.dll";
     const std::wstring system32 = L"C:\\Windows\\System32";
     const std::wstring wow64 = L"C:\\Windows\\SysWOW64";
     DWORD wowAttributes = GetFileAttributesW((wow64 + L"\\forwarders").c_str());
     bool installWow64 = requireWow64 || (wowAttributes != INVALID_FILE_ATTRIBUTES && (wowAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    DWORD vb6Attributes = installWow64 ? GetFileAttributesW(vb6Runtime.c_str()) : INVALID_FILE_ATTRIBUTES;
+    bool hasVb6Runtime = installWow64 && vb6Attributes != INVALID_FILE_ATTRIBUTES && (vb6Attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
     // Complete all architecture preflights before touching a system file or registry value.
     if (!PreflightArchitecture(shim64, system32, IMAGE_FILE_MACHINE_AMD64) ||
-        (installWow64 && !PreflightArchitecture(shim86, wow64, IMAGE_FILE_MACHINE_I386))) return 1;
+        (installWow64 && !PreflightArchitecture(shim86, wow64, IMAGE_FILE_MACHINE_I386)) ||
+        (hasVb6Runtime && !PreflightPe(vb6Runtime, IMAGE_FILE_MACHINE_I386))) return 1;
     if (!EnablePrivilege(L"SeBackupPrivilege") || !EnablePrivilege(L"SeRestorePrivilege")) {
         fwprintf(stderr, L"[ERR] Cannot enable installer privileges (err=%lu).\n", GetLastError());
         return 1;
@@ -789,7 +809,9 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
     if (RegCloseKey(key) != ERROR_SUCCESS) return 1;
-    if (!InstallArchitecture(shim64, system32) || (installWow64 && !InstallArchitecture(shim86, wow64))) return 1;
+    if (!InstallArchitecture(shim64, system32) ||
+        (installWow64 && !InstallArchitecture(shim86, wow64)) ||
+        (hasVb6Runtime && !CopyRequiredFile(vb6Runtime, wow64 + L"\\msvbvm60.dll"))) return 1;
     if (!installWow64) wprintf(L"[OK] WOW64 not requested or present; installing x64 only.\n");
     if (!RemoveKnownDllEntries()) {
         fwprintf(stderr, L"[ERR] Cannot update KnownDLLs (err=%lu).\n", GetLastError());

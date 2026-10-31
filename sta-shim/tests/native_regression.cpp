@@ -2,6 +2,7 @@
 // the shim source or invoking its private functions. Also runs on Server Core.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <oleauto.h>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -583,6 +584,11 @@ void TestUserObjectsAndClipboard(bool shim) {
     Check("N05_reuse_after_exhaustion", RegisterClipboardFormatW(L"RTRange_0") == first);
 }
 
+LRESULT CALLBACK BasicProcA(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == testMessage) return 11;
+    return DefWindowProcA(window, message, wParam, lParam);
+}
+
 struct DelayDescriptor {
     DWORD Attributes, DllName, ModuleHandle, Iat, Names, BoundIat, UnloadIat, Timestamp;
 };
@@ -606,10 +612,118 @@ void* EffectiveUser32Target(HMODULE module, const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(module, name));
 }
 
+void TestAnsiAndHeadlessGdi(bool shim) {
+    WNDCLASSEXA clsA{};
+    clsA.cbSize = sizeof(clsA);
+    clsA.lpszClassName = "RTAnsiClass";
+    clsA.hInstance = instance;
+    clsA.lpfnWndProc = BasicProcA;
+    clsA.cbWndExtra = 16;
+    ATOM atomA = RegisterClassExA(&clsA);
+    Check("VB6_ansi_register_class", atomA != 0);
+    WNDCLASSEXA queriedA{};
+    queriedA.cbSize = 0xCCCCCCCCu; // msvbvm60.dll calls GetClassInfoExA("VBBubble") without initializing cbSize.
+    Check("VB6_ansi_class_info", GetClassInfoExA(instance, "RTAnsiClass", &queriedA) &&
+        queriedA.cbWndExtra == 16 && queriedA.lpfnWndProc == BasicProcA);
+    HWND hwndA = CreateWindowExA(0, "RTAnsiClass", "ansi-window", 0, 1, 2, 3, 4, HWND_MESSAGE, nullptr, instance, nullptr);
+    Check("VB6_ansi_create_window", hwndA != nullptr);
+    if (hwndA) {
+        char classNameBuf[64]{};
+        int classNameLen = GetClassNameA(hwndA, classNameBuf, sizeof(classNameBuf));
+        Check("VB6_ansi_class_name", classNameLen > 0 && std::strcmp(classNameBuf, "RTAnsiClass") == 0);
+        SetWindowLongA(hwndA, 0, 0x13572468);
+        Check("VB6_ansi_window_long", GetWindowLongA(hwndA, 0) == 0x13572468);
+        Check("VB6_ansi_send_message", SendMessageA(hwndA, testMessage, 0, 0) == 11);
+        PostMessageA(hwndA, testMessage, 77, 88);
+        MSG msgA{};
+        Check("VB6_ansi_post_peek_dispatch", PeekMessageA(&msgA, hwndA, testMessage, testMessage, PM_REMOVE) &&
+            msgA.wParam == 77 && msgA.lParam == 88 && DispatchMessageA(&msgA) == 11);
+        DestroyWindow(hwndA);
+    }
+    Check("VB6_ansi_unregister_class", UnregisterClassA("RTAnsiClass", instance) != FALSE);
+
+    UINT clipFmtA = RegisterClipboardFormatA("RTRange_0");
+    char clipNameA[64]{};
+    int clipLenA = GetClipboardFormatNameA(clipFmtA, clipNameA, sizeof(clipNameA));
+    Check("VB6_ansi_clipboard_format", clipFmtA >= 0xC000 && clipLenA > 0 && std::strcmp(clipNameA, "RTRange_0") == 0);
+
+    HDC dc = GetDC(nullptr);
+    int dpiX = GetDeviceCaps(dc, LOGPIXELSX);
+    int dpiY = GetDeviceCaps(dc, LOGPIXELSY);
+    HGDIOBJ guiFont = GetStockObject(DEFAULT_GUI_FONT);
+    int released = ReleaseDC(nullptr, dc);
+    Check("VB6_headless_gdi_caps_and_font", dc != nullptr && dpiX > 0 && dpiY > 0 &&
+        (!shim || (dpiX == 96 && dpiY == 96)) && guiFont != nullptr && released == 1);
+    Check("VB6_headless_metrics_and_brush", GetSystemMetrics(SM_CXSCREEN) > 0 &&
+        GetSysColorBrush(COLOR_BTNFACE) != nullptr);
+    if (sizeof(void*) == 4 && GetFileAttributesW(L"C:\\Windows\\SysWOW64\\msvbvm60.dll") != INVALID_FILE_ATTRIBUTES) {
+        HMODULE vb6 = LoadLibraryW(L"msvbvm60.dll");
+        if (!vb6) {
+            std::printf("msvbvm60 LoadLibrary failed err=%lu\n", GetLastError());
+            HMODULE raw = LoadLibraryExW(L"C:\\Windows\\SysWOW64\\msvbvm60.dll", nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+            if (raw) {
+                BYTE* base = reinterpret_cast<BYTE*>(reinterpret_cast<ULONG_PTR>(raw) & ~static_cast<ULONG_PTR>(3));
+                auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+                auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+                DWORD impRva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+                if (impRva) {
+                    for (auto* imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + impRva); imp->Name; ++imp) {
+                        const char* dll = reinterpret_cast<const char*>(base + imp->Name);
+                        HMODULE dep = LoadLibraryA(dll);
+                        if (!dep) {
+                            std::printf("MISSING DEP DLL: %s err=%lu\n", dll, GetLastError());
+                            continue;
+                        }
+                        DWORD thunkRva = imp->OriginalFirstThunk ? imp->OriginalFirstThunk : imp->FirstThunk;
+                        for (auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + thunkRva); thunk->u1.AddressOfData; ++thunk) {
+                            if (IMAGE_SNAP_BY_ORDINAL(thunk->u1.Ordinal)) {
+                                WORD ord = static_cast<WORD>(IMAGE_ORDINAL(thunk->u1.Ordinal));
+                                if (!GetProcAddress(dep, reinterpret_cast<LPCSTR>(static_cast<ULONG_PTR>(ord)))) {
+                                    std::printf("MISSING EXPORT: %s!#%u\n", dll, ord);
+                                }
+                            } else {
+                                auto* byName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + thunk->u1.AddressOfData);
+                                if (!GetProcAddress(dep, reinterpret_cast<const char*>(byName->Name))) {
+                                    std::printf("MISSING EXPORT: %s!%s\n", dll, reinterpret_cast<const char*>(byName->Name));
+                                }
+                            }
+                        }
+                    }
+                }
+                FreeLibrary(raw);
+            }
+        }
+        Check("VB6_msvbvm60_load", vb6 != nullptr);
+        if (vb6) {
+            HMODULE oleaut = GetModuleHandleW(L"oleaut32.dll");
+            using LoadRegTypeLibFn = HRESULT(WINAPI*)(REFGUID rguid, WORD wVerMajor, WORD wVerMinor, LCID lcid, ITypeLib** pptlib);
+            auto pLoadRegTypeLib = oleaut ? reinterpret_cast<LoadRegTypeLibFn>(GetProcAddress(oleaut, "LoadRegTypeLib")) : nullptr;
+            if (pLoadRegTypeLib) {
+                static const GUID kVbRunGuid = {0xEA544A21, 0xC82D, 0x11D1, {0xA3, 0xE4, 0x00, 0xA0, 0xC9, 0x0A, 0xEA, 0x82}};
+                static const GUID kStdOleGuid = {0x00020430, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+                ITypeLib* tlbVbRun = nullptr;
+                ITypeLib* tlbStdOle = nullptr;
+                HRESULT hrVbRun = pLoadRegTypeLib(kVbRunGuid, 6, 0, 9, &tlbVbRun);
+                HRESULT hrStdOle = pLoadRegTypeLib(kStdOleGuid, 2, 0, 0, &tlbStdOle);
+                ITypeInfo* tiUnknown = nullptr;
+                HRESULT hrTi = tlbStdOle ? tlbStdOle->GetTypeInfoOfGuid(IID_IUnknown, &tiUnknown) : E_FAIL;
+                Check("VB6_typelib_redirect_and_fallback",
+                    SUCCEEDED(hrVbRun) && tlbVbRun != nullptr &&
+                    SUCCEEDED(hrStdOle) && tlbStdOle != nullptr &&
+                    SUCCEEDED(hrTi) && tiUnknown != nullptr);
+                if (tiUnknown) tiUnknown->Release();
+                if (tlbVbRun) tlbVbRun->Release();
+                if (tlbStdOle) tlbStdOle->Release();
+            }
+            FreeLibrary(vb6);
+        }
+    }
+}
+
 void TestRouting(bool requireShim) {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     HMODULE shim = GetModuleHandleW(L"nanoserver_sta_shim.dll");
-    for (const char* name : {"CreateWindowExW", "SendMessageW", "PeekMessageW", "GetClassInfoW", "CallWindowProcW"}) {
+    for (const char* name : {"CreateWindowExW", "CreateWindowExA", "SendMessageW", "SendMessageA", "PeekMessageW", "PeekMessageA", "GetClassInfoW", "RegisterClassExA", "CallWindowProcW"}) {
         void* target = EffectiveUser32Target(user32, name);
         HMODULE owner = nullptr;
         wchar_t path[MAX_PATH]{};
@@ -642,6 +756,7 @@ int wmain(int argc, wchar_t* argv[]) {
     TestQueueLifetimeAndFilteredWait();
     TestTimersWaitsAndQuit();
     TestUserObjectsAndClipboard(requireShim);
+    TestAnsiAndHeadlessGdi(requireShim);
     TestRouting(requireShim);
     std::printf("SUMMARY failures=%d\n", failures);
     SetEvent(stop);

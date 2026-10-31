@@ -56,7 +56,8 @@ Out of the box, `mcr.microsoft.com/windows/nanoserver:ltsc2025` **cannot** run a
 | ❌ **No IIS 10 included** | Installs `Microsoft.NanoServer.IIS` using online `DISM /Add-Capability`, configures IIS, and monitors WAS and W3SVC in the foreground. |
 | ❌ **No `msiexec` or `netsh` to install ASP.NET Core Hosting Bundle (ANCM V2)** | ✅ Extracts `aspnetcoremodule_x64_en_v2.msi` in a builder stage and uses a standalone C# tool (`dotnet RegisterAncm.dll`) to register `aspnetcorev2.dll` and inject the `system.webServer/aspNetCore` schema into `applicationHost.config`. |
 | ❌ **No Full .NET Framework 4.8.1 (`net481`) or `System.Web`** | ✅ Transplants `C:\Windows\Microsoft.NET` (`Framework` + `Framework64`), native CLR CRT forwarders (`mscoree.dll`, `ucrtbase_clr0400.dll`, `vcruntime140_clr0400.dll`, `vcruntime140_1_clr0400.dll`), 32-bit/64-bit `inetsrv`, and NDP/ASP.NET registry hives from Server Core into Nano Server. |
-| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
+| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` / `gdi32.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
+| ❌ **No 32-bit Visual Basic 6 (`msvbvm60.dll`) runtime, legacy DDE/GDI/OLE1 PE exports, ANSI windowing, or registration-free `IDispatch` TypeLib marshaling** | ✅ Pre-installs `msvbvm60.dll` in `SysWOW64` across all 5 WoW64-enabled images, adds 35 missing `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` forwarder exports, provides ANSI window/class/message/clipboard and headless 96-DPI GDI device-context shims, and hooks `oleaut32.dll` (`SxsOleAut32RedirectTypeLibrary`) to resolve embedded `TYPELIB` resources in-memory without `HKCR\TypeLib` registry keys or `sxs.dll`. |
 
 ---
 
@@ -158,48 +159,60 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.3.0`, `-v1.3`, `-v1`).
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.4.0`, `-v1.4`, `-v1`).
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.3.0, -v1.3, and -v1
-.\set-version.ps1 -Version 1.3.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v1.4.0, -v1.4, and -v1
+.\set-version.ps1 -Version 1.4.0
 
 # Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.3.0 -DotNetVersion 10.0.14
+.\set-version.ps1 -Version 1.4.0 -DotNetVersion 10.0.14
 ```
 
 - **ASP.NET Core 10 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.3.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.3`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.4.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.4`
   - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
 - **ASP.NET Core 10 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.3.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.3`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.4.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.4`
   - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.3.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.3`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.4.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.4`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.3.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.3`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.4.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.4`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.3.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.3`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.4.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.4`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.3.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.3`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.4.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.4`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
+
+---
+
+## ✨ What's New in `v1.4.0`
+
+Container revision **`1.4.0`** adds end-to-end support for **legacy 32-bit Visual Basic 6 (`msvbvm60.dll`) ActiveX/COM calculation libraries** and **registration-free embedded `TYPELIB` resolution** on Windows Nano Server 2025 (see [`CHANGELOG.md`](./CHANGELOG.md) and [Breakthrough #4 below](#6-breakthrough-4-running-legacy-32-bit-visual-basic-6-msvbvm60dll-activexcom-libraries--registration-free-typelib-redirection)):
+
+- **Bundled 32-Bit Visual Basic 6 Runtime (`msvbvm60.dll`):** Pre-installed into `C:\Windows\SysWOW64\msvbvm60.dll` by `install_sta_shim.exe` across all five WoW64-enabled images (`aspnet-x86`, `iis-aspnet-x64`, `iis-aspnet-x86`, `iis-netfx-x64`, `iis-netfx-x86`).
+- **35 Additional Static PE Forwarder Exports (`user32.dll`, `gdi32.dll`, `ole32.dll`):** Rebuilds PE export tables in `System32\forwarders` and `SysWOW64\forwarders` to include 16 `user32.dll` DDE functions (`DdeInitializeA`, `DdeClientTransaction`, etc.), 14 `gdi32.dll` drawing/region/palette functions (`CreateBitmapIndirect`, `CreateHalftonePalette`, `EnumFontsA`, etc.), and 5 `ole32.dll` OLE1/link functions (`CoIsOle1Class`, `OleCreateLink`, etc.) so `ntdll!LdrpSnapModule` resolves every static import of `msvbvm60.dll`.
+- **Full ANSI Windowing, Class Registration, Message Queue & Clipboard Shims (`*A`):** Implements `RegisterClassA`, `RegisterClassExA`, `UnregisterClassA`, `GetClassInfo[Ex]A`, `GetClassNameA`, `Get/SetClassLongA`, `CreateWindowExA`, `DefWindowProcA`, `CallWindowProcA`, `Get/SetWindowLong[Ptr]A`, `PeekMessageA`, `GetMessageA`, `DispatchMessageA`, `PostMessageA`, `PostThreadMessageA`, `SendMessageA`, `RegisterClipboardFormatA`, and `GetClipboardFormatNameA` atop the user-mode STA window engine, including Win32-accurate `GetClassInfoExA/W` handling for callers that pass an uninitialized `WNDCLASSEX.cbSize` (such as `msvbvm60.dll` probing `"VBBubble"` when initializing a second STA worker thread).
+- **Headless 96-DPI GDI & Screen Metric Shims (`gdi32.dll` + `user32.dll`):** Hooks `gdi32.dll` delay-load tables (`ext-ms-win-rtcore-gdi-*` and `ext-ms-win-gdi-*`) and implements `GetDC`, `GetDeviceCaps` (`LOGPIXELSX = 96`, `LOGPIXELSY = 96`), `GetStockObject`, `GetSystemMetrics`, `SelectObject`, `DeleteObject`, `GetTextMetricsA/W`, `CreateFontIndirectA/W`, and system color brushes so `msvbvm60.dll`'s internal STA context initialization (`VBBubbleRT6`, `VBFocusRT6`, `IDEOwner`) succeeds instead of aborting with `E_FAIL (0x80004005)`.
+- **Registration-Free Embedded TypeLib Redirection (`SxsOleAut32RedirectTypeLibrary`):** Hooks `oleaut32.dll`'s delay-loaded `ext-ms-win-sxs-oleautomation-l1-1-0` contract and scans loaded process modules for embedded `TYPELIB` PE resources via `LoadTypeLibEx(..., REGKIND_NONE, ...)`, resolving `IDispatch` and dual-interface `ITypeInfo` marshaling (`LoadRegTypeLib`) in memory without `HKCR\TypeLib` registry keys or `sxs.dll` (`TYPE_E_LIBNOTREGISTERED 0x8002801D` eliminated).
 
 ---
 
@@ -222,6 +235,7 @@ Container revision **`1.3.0`** completes the full [Roundtable review (`R01`–`R
 | ✅ **Plain Native DLLs via [`AdaskoTheBeAsT.Interop.Unmanaged`](https://github.com/AdaskoTheBeAsT/AdaskoTheBeAsT.Interop.Unmanaged)** | **Available for compatible headless DLLs (`x86` & `x64`)** | Standard C/C++/Delphi/PowerBasic/Fortran DLL loading (`LoadLibrary` / `GetProcAddress` / `FreeLibrary`) works natively in both 32-bit (`SysWOW64`) and 64-bit (`System32`). *(Tip: If your native DLL links against the Visual C++ Redistributable like `vcruntime140.dll` / `msvcp140.dll`, copy those CRT DLLs next to your native DLL.)* |
 | ⚠️ **SxS Registration-Free COM via `CreateActCtxW` (`*.manifest`)** | **Blocked by `apisetschema.dll` (even if `sxs.dll` is copied)** | `KernelBase!CreateActCtxW` checks `IsCreateActCtxWWorkerPresent()` (`ext-ms-win-kernel32-sidebyside-l1-1-0`) in the kernel-mapped `apisetschema.dll` *before* calling `sxs.dll`, returning `ERROR_INVALID_FUNCTION (1)`. Copying Server Core's `apisetschema.dll` or `sxssrv.dll` breaks container silo boot (`0xc0370111` at `hcs::System::Start`) because Server Core's schema redirects console/windowing API sets away from Nano Server's headless `coniosrv.dll`. |
 | ✅ **Registration-Free COM with `.manifest` via `DllGetClassObject` + `CoRegisterClassObject` Fallback** | **Exercised by the included COM fixtures** | Verified with `NativeCOM.dll` + `NativeCOM.manifest`: when `CreateActCtxW` returns `ERROR_INVALID_FUNCTION (1)`, parsing `<comClass clsid="{...}"/>` from the `.manifest` file, calling `DllGetClassObject` on the COM DLL, and registering the `IClassFactory` in-memory via `combase!CoRegisterClassObject(..., CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, out cookie)` allows `new StringConcatenatorClass()` (`CoCreateInstance`) to succeed with `S_OK` on both `x86` and `x64` Nano Server without `regsvr32` or OS modifications! |
+| ✅ **32-Bit Visual Basic 6 (`msvbvm60.dll`) ActiveX/COM DLLs & Registration-Free `IDispatch` TypeLib Marshaling** | **Supported in all 5 WoW64-enabled images (`v1.4.0+`)** | Pre-installs `SysWOW64\msvbvm60.dll`, adds 35 missing `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` PE forwarder exports, provides ANSI window/class/message/clipboard and headless 96-DPI GDI shims for VB6 runtime startup (`VBBubbleRT6`, `VBFocusRT6`, `IDEOwner`), and redirects `oleaut32!LoadRegTypeLib` (`SxsOleAut32RedirectTypeLibrary`) to embedded `TYPELIB` PE resources via `LoadTypeLibEx(..., REGKIND_NONE, ...)`. |
 | **Single-Threaded Apartment (`STA`) and Win32 message pumping** | **Scoped headless implementation, not full Win32 parity** | Native OS-level shimming and the external managed NuGet shim are separate implementations. See the support table below and run the native and managed regression suites for your build. Exact unshimmed failure codes, including `E_NOTIMPL`, depend on the OS build and call path and are not guaranteed here. |
 
 ### Native STA shim support and limitations
@@ -244,8 +258,9 @@ and `WAS`/`W3SVC` host-loss qualification pass across all six flavours; see
 | Sends, posts, filters and quit (R01, R07, R09, N01) | Same-thread sends dispatch directly; cross-thread sends wait for owner dispatch and service incoming sends. Pending sends cancel on destruction/exit. Filters include descendants; quit state ignores filters. | A non-pumping owner can block `SendMessageW` indefinitely, as there is no timeout. `SendMessageTimeoutW`, broadcasts and cross-process messaging are not implemented. Explicitly posted `WM_QUIT` also uses synthetic quit state. |
 | Queue lifetime (R08) | Only an owner creates its queue; FLS cleanup removes its windows, timers and queued work at normal thread exit | Posting to another thread without an initialized queue fails. Forced thread termination and fiber-hosted workloads are not qualified. |
 | Timers, waits and queue status (R05, R06) | Lazy owner-thread deadlines, low-priority `WM_TIMER`, replacement/cancellation, typed current/changed queue bits, wake masks and the three documented MWMO flags | Timer delivery requires pumping and is not real-time; coalescing tolerance is ignored. Wait-all uses bounded waits to keep servicing sent messages. No physical input or painting subsystem. |
-| ANSI window/message APIs (N02) | Not implemented | Probe the exact engine imports and dynamic lookups before selecting these images. The few ANSI GDI exports do not imply ANSI window support. |
-| GDI, icons and common controls | Minimal startup stubs for selected legacy imports | Synthetic handles, fixed text/icon approximations and no rendering or general GDI resource lifetime. Not a replacement for a GUI, VCL controls, GDI or DirectX. |
+| ANSI window, class, message and clipboard APIs (`v1.4.0+`) | `RegisterClass[Ex]A`, `UnregisterClassA`, `GetClassInfo[Ex]A`, `GetClassNameA`, `Get/SetClassLongA`, `CreateWindowExA`, `DefWindowProcA`, `CallWindowProcA`, `Get/SetWindowLong[Ptr]A`, `Peek/Get/Dispatch/Post/SendMessageA`, `PostThreadMessageA`, and `Register/GetClipboardFormat[Name]A` bridged to the user-mode STA window engine | Headless STA windowing and message dispatch only; does not translate complex message-specific ANSI/Unicode `lParam` structures beyond `WM_NCCREATE`/`WM_CREATE`. |
+| Headless GDI, screen metrics, DDE & OLE1 forwarders (`v1.4.0+`) | 96-DPI headless device contexts (`GetDC`, `GetDeviceCaps`, `GetStockObject`, `GetSystemMetrics`, `SelectObject`, `DeleteObject`, `GetTextMetricsA/W`, `GetSysColorBrush`) plus 35 static PE forwarders across `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` | Synthetic handles and fixed 96-DPI/font metrics for headless runtime startup (`msvbvm60.dll`, VCL, ATL). Not a replacement for a physical display, GDI rendering, or DDE conversation transport. |
+| Registration-free TypeLib redirection (`v1.4.0+`) | Hooks `oleaut32.dll` (`ext-ms-win-sxs-oleautomation-l1-1-0!SxsOleAut32RedirectTypeLibrary`) and scans loaded modules in the current process for embedded `TYPELIB` resources matching the requested `LIBID` via `LoadTypeLibEx(..., REGKIND_NONE, ...)` | Resolves `TYPELIB` resources embedded in already-loaded process DLLs; external standalone `.tlb` files that are not loaded as modules require explicit loading or registry entries. |
 | Hook memory protection (R17, R19) | Serialized writes, no-op skipping, derived-address bounds checks and original page-protection restoration | Non-executable data pages become writable without execute access. An already-executable page may briefly become writable and executable. This is not a blanket W^X guarantee. |
 
 The `AdaskoTheBeAsT.Interop.COM` **4.2.0** package remains pinned in the managed tests.
@@ -641,6 +656,89 @@ RUN DISM /Online /Get-Capabilities >nul `
     && (if exist C:\Windows\WinSxS\pending.xml (echo CBS pending.xml still present && exit /b 1))
 ```
 Opening a CBS session via `DISM /Online /Get-Capabilities` while the container is **running normally (prior to shutdown)** allows `Winmgmt` and `TrustedInstaller` to start cleanly and synchronously complete all 115 pending advanced installer operations, delete `pending.xml`, and clean up the ~98 MB `CBS.log`/`DISM.log` files before the `RUN` step exits—eliminating the `0xc0370111` race condition and reducing image layer disk usage by over **1.2 GB**.
+
+### 6. Breakthrough #4: Running Legacy 32-Bit Visual Basic 6 (`msvbvm60.dll`) ActiveX/COM Libraries & Registration-Free TypeLib Redirection
+
+In industrial engineering (HVAC, thermodynamics, fluid mechanics, acoustics, and structural pricing), many mission-critical OEM calculation engines were compiled as **32-bit Visual Basic 6 (`VB6`) ActiveX/COM in-process DLLs**. Even when compiled as headless calculation components (*Unattended Execution* / *Retained in Memory*, with zero forms or visible controls), a VB6 ActiveX DLL is not a simple C DLL—it is a metadata-driven COM server hosted inside Microsoft's 32-bit Visual Basic 6 Virtual Machine (**`msvbvm60.dll`**).
+
+#### What a 32-Bit Visual Basic 6 ActiveX/COM Library Actually Uses Under the Hood
+
+When a .NET worker thread loads and invokes a 32-bit VB6 ActiveX/COM DLL, five distinct OS layers participate:
+
+1. **The VB6 Virtual Machine (`msvbvm60.dll`) & Entry-Point Thunks (`ThunRTMain` / `VBDllGetClassObject`):**
+   - A VB6 ActiveX DLL imports `msvbvm60.dll` (specifically `ThunRTMain`, `DllFunctionCall`, `__vba*` string/array/variant/error helpers, and `VBDllGetClassObject`).
+   - Its exported `DllGetClassObject` stub passes the compiled VB6 project header (`VBHeader` / `LPPROJECTINFO`) into `msvbvm60!VBDllGetClassObject`.
+2. **Legacy Win32 Static PE Imports (`user32.dll`, `gdi32.dll`, `ole32.dll`, `oleaut32.dll`, `advapi32.dll`):**
+   - Because `msvbvm60.dll` is a monolithic runtime designed in 1998 to support both GUI Forms and headless ActiveX servers in a single binary, its PE Import Address Table (`IMAGE_DIRECTORY_ENTRY_IMPORT`) statically binds to **Dynamic Data Exchange (`DDE`)** functions in `user32.dll`, legacy **GDI region/bitmap/palette/font** functions in `gdi32.dll`, and **OLE 1.0 compatibility / link** functions in `ole32.dll`.
+3. **Unconditional GDI & Screen Metric Probing During Runtime Initialization:**
+   - Before `VBDllGetClassObject` constructs a single `IClassFactory`, `msvbvm60.dll` initializes its thread/runtime environment (`InitRuntime` / `Ruby` subsystem).
+   - Even for a headless calculation DLL, `msvbvm60.dll` calls `GetDC(NULL)`, `GetDeviceCaps(hdc, LOGPIXELSX)` and `GetDeviceCaps(hdc, LOGPIXELSY)` (to compute twips-per-pixel ratios, `1440 / DPI`, which cannot divide by zero), `GetStockObject(DEFAULT_GUI_FONT)` / `GetStockObject(SYSTEM_FONT)`, `GetSystemMetrics`, and `GetSysColorBrush`.
+4. **ANSI STA Window Classes, Hidden Owner Windows & Clipboard Formats:**
+   - Because VB6 was built in the ANSI Win9x/NT4 era, `msvbvm60.dll` uses **ANSI (`*A`)** windowing APIs rather than Unicode (`*W`) APIs.
+   - During STA initialization, `msvbvm60.dll` calls `RegisterClipboardFormatA`, registers internal ANSI window classes (`RegisterClassA` / `RegisterClassExA` for `"VBBubbleRT6"`, `"VBFocusRT6"`, and `"IDEOwner"`), and creates hidden STA owner windows via `CreateWindowExA` to manage apartment lifetime and internal notifications (`SendMessageA`, `PeekMessageA`, `DispatchMessageA`).
+5. **Dual-Interface / `IDispatch` Type-Library Marshaling (`oleaut32!LoadRegTypeLib` & Embedded `TYPELIB` Resources):**
+   - Every VB6 ActiveX DLL embeds a compiled COM Type Library (`TYPELIB` resource `#1`) inside its PE `.rsrc` section describing its coclasses, `_ClassName` dual interfaces (`IID_*`), dispids, and user-defined `enum` / `struct` types.
+   - When caller code (or internal VB6 cross-class calls via `__vbaObjSet` / `IDispatch::Invoke` / `ITypeInfo`) invokes methods or properties on a VB6 object, `msvbvm60.dll` and `oleaut32.dll` look up the interface metadata by calling `oleaut32!LoadRegTypeLib(rguidLibId, wVerMajor, wVerMinor, lcid, &pTypeLib)`.
+
+#### The 5-Stage Engineering Process for Discovering & Filling Nano Server OS Gaps
+
+Bringing a legacy 32-bit VB6 ActiveX/COM library onto Windows Nano Server 2025 without `regsvr32`, `msiexec`, or a GUI subsystem required systematically diagnosing and solving five sequential failure modes. This same 5-stage methodology applies whenever you port a new class of native or COM binary to Nano Server:
+
+```
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│ Stage 1: Static PE Dependency & Export Table Audit (dumpbin / PE Import Walk)     │
+│   • Target DLL requires msvbvm60.dll (not shipped in Nano Server WOWSupport)      │
+│   • msvbvm60.dll imports 35 symbols missing from SysWOW64\forwarders\*.dll        │
+├─────────────────────────────────────────┬─────────────────────────────────────────┤
+│ Stage 2: Forwarder PE Export Rebuilding │ Stage 3: Runtime Init Failure Diagnosis │
+│   • install_sta_shim.exe injects 16     │   • DllGetClassObject returns E_FAIL    │
+│     user32 DDE, 14 gdi32, and 5 ole32   │     (0x80004005) during msvbvm60 init   │
+│     forwarders -> nanoserver_sta_shim   │   • Trace shows unmapped gdi32 & ANSI   │
+│   • ntdll!LdrpSnapModule succeeds       │     user32 delay-loaded API sets        │
+├─────────────────────────────────────────┴─────────────────────────────────────────┤
+│ Stage 4: Headless 96-DPI GDI & ANSI STA Windowing (nanoserver_sta_shim.dll)       │
+│   • Hook gdi32.dll delay-load tables (ext-ms-win-rtcore-gdi-*, ext-ms-win-gdi-*)  │
+│   • Provide 96-DPI GetDeviceCaps, stock objects, and full *A window/message APIs  │
+│   • CoCreateInstance & VB6 Class_Initialize succeed with S_OK!                    │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│ Stage 5: Registration-Free Embedded TypeLib Redirection (0x8002801D Fix)          │
+│   • Method call returns TYPE_E_LIBNOTREGISTERED (0x8002801D) in LoadRegTypeLib    │
+│   • Hook oleaut32.dll delay-load slot SxsOleAut32RedirectTypeLibrary              │
+│   • Scan loaded modules via LoadTypeLibEx(REGKIND_NONE) -> 200 OK in container!   │
+└───────────────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **Stage 1 — Static PE Import & Transitive Dependency Audit (`ERROR_MOD_NOT_FOUND 126` & `ERROR_PROC_NOT_FOUND 127`):**
+   - **Symptom:** Calling `LoadLibraryExW` on the 32-bit ActiveX DLL inside Nano Server initially fails with Win32 error `126` (`ERROR_MOD_NOT_FOUND`) because `Microsoft.NanoServer.Datacenter.WOWSupport` does not include `C:\Windows\SysWOW64\msvbvm60.dll`. After placing `msvbvm60.dll` in `SysWOW64`, `LoadLibraryExW` fails with Win32 error `127` (`ERROR_PROC_NOT_FOUND`).
+   - **Diagnosis:** Walking the PE import directory (`IMAGE_DIRECTORY_ENTRY_IMPORT`) of `msvbvm60.dll` against every DLL in Nano Server's `C:\Windows\SysWOW64` and `C:\Windows\SysWOW64\forwarders` reveals exactly **35 missing static exports**:
+     - **16 `user32.dll` DDE functions:** `DdeAccessData`, `DdeClientTransaction`, `DdeCmpStringHandles`, `DdeConnect`, `DdeCreateDataHandle`, `DdeCreateStringHandleA`, `DdeDisconnect`, `DdeFreeDataHandle`, `DdeFreeStringHandle`, `DdeGetData`, `DdeGetLastError`, `DdeInitializeA`, `DdeNameService`, `DdePostAdvise`, `DdeSetUserHandle`, `DdeUninitialize`.
+     - **14 `gdi32.dll` functions:** `CreateBitmapIndirect`, `CreateDiscardableBitmap`, `CreateEllipticRgnIndirect`, `CreateHalftonePalette`, `CreatePolygonRgn`, `EnumFontsA`, `GetBrushOrgEx`, `GetNearestColor`, `GetTextExtentPointA`, `PtInRegion`, `RoundRect`, `SetBrushOrgEx`, `SetWindowOrgEx`, `UnrealizeObject`.
+     - **5 `ole32.dll` OLE1/link functions:** `CoIsOle1Class`, `OleConvertIStorageToOLESTREAM`, `OleConvertOLESTREAMToIStorage`, `OleCreateLink`, `OleDoAutoConvert`.
+2. **Stage 2 — Rebuilding Forwarder PE Export Tables (`install_sta_shim.exe`):**
+   - **Solution:** Even though a headless calculation library never opens a DDE conversation or an OLE 1.0 link, the Windows PE loader (`ntdll!LdrpSnapModule`) refuses to map `msvbvm60.dll` unless every symbol in its static import table exists in the target DLL's export directory.
+   - We extended `install_sta_shim.exe` (`kUser32Exports`, `kGdi32Exports`, `kOle32Exports`) to rebuild the `.edata` export tables of `user32.dll`, `gdi32.dll`, and `ole32.dll` in both `System32\forwarders` and `SysWOW64\forwarders`, forwarding all 35 symbols to `nanoserver_sta_shim.<SymbolName>` (and copying `msvbvm60.dll` into `C:\Windows\SysWOW64\msvbvm60.dll`).
+3. **Stage 3 — Diagnosing Hidden Runtime Initialization (`DllGetClassObject` $\rightarrow$ `0x80004005 E_FAIL`):**
+   - **Symptom:** With the static imports satisfied, `LoadLibraryExW` and `GetProcAddress("DllGetClassObject")` succeed, but invoking `DllGetClassObject(clsid, IID_IClassFactory, &pFactory)` returns **`0x80004005` (`E_FAIL`)** (or raises VB6 runtime error `429: ActiveX component can't create object`).
+   - **Diagnosis:** Tracing `msvbvm60!VBDllGetClassObject` reveals that `msvbvm60.dll` initializes its desktop/GDI state and hidden STA window classes on first entry:
+     1. It calls `user32!GetDC(NULL)` and `gdi32!GetDeviceCaps(hdc, LOGPIXELSX / LOGPIXELSY)`. On stock Nano Server, `gdi32.dll` delay-loads `ext-ms-win-gdi-devcaps-l1-1-0.dll` and `ext-ms-win-rtcore-gdi-devcaps-l1-1-0.dll`, which are unmapped in `apisetschema.dll`, returning `0` DPI and causing `msvbvm60.dll` to fail its display-metric check.
+     2. It calls `gdi32!GetStockObject`, `user32!GetSystemMetrics`, and `user32!GetSysColorBrush`.
+     3. It calls `user32!RegisterClipboardFormatA`, `user32!RegisterClassA` (`"VBBubbleRT6"`, `"VBFocusRT6"`, `"IDEOwner"`), and `user32!CreateWindowExA`. Because our `v1.3.0` shim only hooked Unicode (`*W`) windowing APIs and did not hook `gdi32.dll`'s delay-load descriptors, `RegisterClassA` and `GetDeviceCaps` fell through to Nano Server's unmapped extension stubs and returned `0`.
+4. **Stage 4 — Hooking `gdi32.dll` & Implementing Headless 96-DPI GDI + Full ANSI (`*A`) Windowing (Including Multi-STA `"VBBubble"` Initialization):**
+   - **Solution:** We expanded `nanoserver_sta_shim.dll` in three ways:
+     - **GDI Delay-Load Hooking & 96-DPI Headless Device Contexts:** Added `"ext-ms-win-rtcore-gdi-"` and `"ext-ms-win-gdi-"` to `kShimmedPrefixes`, registered `gdi32.dll` in `RefreshHooksLocked()` / `OnDllNotification()`, and implemented headless GDI shims (`GetDC`, `ReleaseDC`, `CreateCompatibleDC`, `DeleteDC`, `GetDeviceCaps` returning `LOGPIXELSX = 96`, `LOGPIXELSY = 96`, `HORZRES = 1920`, `VERTRES = 1080`, `BITSPIXEL = 32`, `PLANES = 1`, `GetStockObject`, `SelectObject`, `DeleteObject`, `GetObjectA/W`, `GetTextMetricsA/W`, `CreateFontIndirectA/W`, `GetSystemMetrics`, and `GetSysColorBrush`).
+     - **Full ANSI (`*A`) Windowing & Clipboard Bridge:** Implemented `RegisterClassA`, `RegisterClassExA`, `UnregisterClassA`, `GetClassInfo[Ex]A`, `GetClassNameA`, `Get/SetClassLongA`, `CreateWindowExA`, `DefWindowProcA`, `CallWindowProcA`, `Get/SetWindowLong[Ptr]A`, `PeekMessageA`, `GetMessageA`, `DispatchMessageA`, `PostMessageA`, `PostThreadMessageA`, `SendMessageA`, `RegisterClipboardFormatA`, and `GetClipboardFormatNameA` with UTF-8/ACP conversion into the existing thread-safe user-mode STA window and message-queue engine.
+     - **Multi-STA-Thread `"VBBubble"` `GetClassInfoExA` Quirks Compatibility:** When a process initializes a *second* STA worker thread (`Thread 2+` in a multi-worker STA pool), `msvbvm60.dll` (`0x6602D84D..0x6602D867`) checks whether the `"VBBubble"` window class is already registered in the process by calling `GetClassInfoExA(hInst, "VBBubble", &wc)` with an **uninitialized stack `WNDCLASSEXA` struct** (`wc.cbSize` is never set by `msvbvm60.dll` before the call). Disassembly of real Windows `SysWOW64\user32.dll` (`GetClassInfoExW` at `0x100306D0` and `GetClassInfoExA` at `0x100B8E20`) confirms that Windows does **not** validate `lpwcx->cbSize` on input. Removing the `output->cbSize != sizeof(WNDCLASSEX)` check in `Shim_GetClassInfoExW` and `Shim_GetClassInfoExA` prevents `msvbvm60.dll` on STA Worker 2+ from falsely concluding `"VBBubble"` is unregistered, calling `RegisterClassExA("VBBubble")`, hitting `ERROR_CLASS_ALREADY_EXISTS`, and aborting `CoCreateInstance` with `0x8007000E (E_OUTOFMEMORY)`.
+   - With Stages 1–4 in place, `DllGetClassObject`, `CoRegisterClassObject`, and `CoCreateInstance` succeed with **`S_OK (0x00000000)`** across both single-worker and 10-worker concurrent STA pools!
+5. **Stage 5 — Solving Registration-Free `IDispatch` / Dual-Interface TypeLib Resolution (`0x8002801D TYPE_E_LIBNOTREGISTERED`):**
+   - **Symptom:** After `CoCreateInstance` creates the VB6 COM instance, invoking a calculation method or property setter (or performing an internal VB6 interface cast) fails with **`0x8002801D` (`TYPE_E_LIBNOTREGISTERED` — *Library not registered*)**.
+   - **Diagnosis:** Disassembling `oleaut32.dll!LoadRegTypeLib` shows how Windows resolves a COM Type Library (`LIBID`):
+     1. First, `oleaut32!LoadRegTypeLib` checks `IsSxsOleAut32RedirectTypeLibraryPresent()` and calls the delay-loaded extension API `ext-ms-win-sxs-oleautomation-l1-1-0.dll!SxsOleAut32RedirectTypeLibrary(rguid, wVerMajor, wVerMinor, lcid, &pTypeLib)` so SxS registration-free COM can intercept the lookup.
+     2. Only if `SxsOleAut32RedirectTypeLibrary` is absent or returns `TYPE_E_LIBNOTREGISTERED` does `oleaut32.dll` query `HKEY_CLASSES_ROOT\TypeLib\{LIBID}` in the Windows Registry.
+     - On Nano Server, `ext-ms-win-sxs-oleautomation-l1-1-0.dll` is unmapped in `apisetschema.dll`, so `oleaut32.dll` skips step 1 and queries `HKCR\TypeLib`, which is empty in a registration-free deployment!
+   - **The Surgical User-Mode Fix (`Shim_SxsOleAut32RedirectTypeLibrary`):**
+     - We added `"ext-ms-win-sxs-oleautomation-l1-"` to `kShimmedPrefixes`, hooked `oleaut32.dll` in `RefreshHooksLocked()` / `OnDllNotification()`, and implemented `Shim_SxsOleAut32RedirectTypeLibrary`:
+     - When `oleaut32!LoadRegTypeLib` asks for `rguid` (`LIBID`), `Shim_SxsOleAut32RedirectTypeLibrary` enumerates the loaded modules in the current process (`K32EnumProcessModules`), calls `oleaut32!LoadTypeLibEx(modulePath, REGKIND_NONE, &pCandidate)` on each module that carries an embedded `TYPELIB` PE resource, compares `pCandidate->GetLibAttr(&pAttr)->guid` against the requested `rguid`, and returns the matching `ITypeLib*` directly in memory!
+     - Because `REGKIND_NONE` parses the embedded `TYPELIB` resource straight from the mapped PE image without writing to the registry, **every VB6 dual-interface method call, property access, user-defined struct/enum, and internal `ITypeInfo` lookup succeeds with `S_OK` at full native speed—with zero `regsvr32` or `HKCR\TypeLib` registry state.**
 
 ---
 

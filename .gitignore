@@ -427,7 +427,7 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
-# Native executables (compiled locally via sta-shim/build_shim.ps1)
+# Native executables (rebuilt locally via sta-shim/build_shim.ps1)
 *.exe
 
 # Official VS Code C# Dev Kit Extension exclusion

@@ -152,7 +152,7 @@ function global:docker {
     $global:LASTEXITCODE = 0
 }
 Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
-& (Join-Path $PSScriptRoot "push.ps1") -Version 1.3.0
+& (Join-Path $PSScriptRoot "push.ps1") -Version 1.4.0
 '@
     $mockPath = Join-Path $publish "mock_publish.ps1"
     Set-Content -LiteralPath $mockPath -Value $mock
@@ -165,8 +165,8 @@ Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
     Assert-Check "R13_all_six_flavours_reached" ($calls.Count -eq 42)
     foreach ($flavour in $flavours) {
         $content = Get-Content -LiteralPath (Join-Path $publish "$flavour\push.ps1") -Raw
-        Assert-Check "version_${flavour}_1_3_0" ($content.Contains("-ltsc2025-v1.3.0") -and
-            $content.Contains("-ltsc2025-v1.3") -and $content.Contains("-ltsc2025-v1"))
+        Assert-Check "version_${flavour}_1_4_0" ($content.Contains("-ltsc2025-v1.4.0") -and
+            $content.Contains("-ltsc2025-v1.4") -and $content.Contains("-ltsc2025-v1"))
     }
 } finally {
     $env:FAKE_DISM_CODE = $savedDism

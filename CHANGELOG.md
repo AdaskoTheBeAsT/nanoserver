@@ -6,6 +6,80 @@ applications, and build tooling.
 Versions below identify the repository and container revision, not the bundled
 .NET runtime version.
 
+## 1.4.0 - 2026-10-31
+
+### Added
+
+- Full 32-bit Visual Basic 6 (`msvbvm60.dll`) ActiveX/COM runtime and
+  registration-free TypeLib support on Windows Nano Server 2025:
+  - Bundled `msvbvm60.dll` in the `sta-shim` payload and installed it into
+    `C:\Windows\SysWOW64\msvbvm60.dll` via `install_sta_shim.exe` across all
+    five WoW64-enabled image flavours (`aspnet-x86`, `iis-aspnet-x64`,
+    `iis-aspnet-x86`, `iis-netfx-x64`, and `iis-netfx-x86`).
+  - Added 35 missing static PE forwarder exports required by `msvbvm60.dll` at
+    module load time (`ntdll!LdrpSnapModule`) to both `install_sta_shim.exe`
+    and `nanoserver_sta_shim.dll`:
+    - `user32.dll` (16 DDE exports): `DdeAccessData`, `DdeClientTransaction`,
+      `DdeCmpStringHandles`, `DdeConnect`, `DdeCreateDataHandle`,
+      `DdeCreateStringHandleA`, `DdeDisconnect`, `DdeFreeDataHandle`,
+      `DdeFreeStringHandle`, `DdeGetData`, `DdeGetLastError`,
+      `DdeInitializeA`, `DdeNameService`, `DdePostAdvise`,
+      `DdeSetUserHandle`, and `DdeUninitialize`.
+    - `gdi32.dll` (14 legacy GDI exports): `CreateBitmapIndirect`,
+      `CreateDiscardableBitmap`, `CreateEllipticRgnIndirect`,
+      `CreateHalftonePalette`, `CreatePolygonRgn`, `EnumFontsA`,
+      `GetBrushOrgEx`, `GetNearestColor`, `GetTextExtentPointA`, `PtInRegion`,
+      `RoundRect`, `SetBrushOrgEx`, `SetWindowOrgEx`, and `UnrealizeObject`.
+    - `ole32.dll` (5 OLE1/link exports): `CoIsOle1Class`,
+      `OleConvertIStorageToOLESTREAM`, `OleConvertOLESTREAMToIStorage`,
+      `OleCreateLink`, and `OleDoAutoConvert`.
+  - Implemented full ANSI windowing, class registration, message-queue, and
+    clipboard APIs (`RegisterClassA`, `RegisterClassExA`, `UnregisterClassA`,
+    `GetClassInfoA`, `GetClassInfoExA`, `GetClassNameA`, `GetClassLongA`,
+    `SetClassLongA`, `CreateWindowExA`, `DefWindowProcA`, `CallWindowProcA`,
+    `GetWindowLongA`, `SetWindowLongA`, `GetWindowLongPtrA`,
+    `SetWindowLongPtrA`, `PeekMessageA`, `GetMessageA`, `DispatchMessageA`,
+    `PostMessageA`, `PostThreadMessageA`, `SendMessageA`,
+    `RegisterClipboardFormatA`, and `GetClipboardFormatNameA`) backed by the
+    user-mode STA window and message-queue engine, including Win32-compatible
+    `GetClassInfoExA` / `GetClassInfoExW` handling when callers pass an
+    uninitialized `WNDCLASSEX.cbSize` (required by `msvbvm60.dll` when probing
+    `"VBBubble"` on secondary STA worker threads).
+  - Implemented headless 96-DPI GDI device-context, stock-object, font-metric,
+    and system-metric shims (`GetDC`, `GetDCEx`, `GetWindowDC`, `ReleaseDC`,
+    `CreateCompatibleDC`, `DeleteDC`, `SaveDC`, `RestoreDC`, `GetDeviceCaps`
+    with `LOGPIXELSX=96` / `LOGPIXELSY=96`, `GetStockObject`,
+    `GetSystemMetrics`, `GetObjectW`, `GetObjectA`, `GetObjectType`,
+    `GetCurrentObject`, `SelectObject`, `DeleteObject`, `CreateSolidBrush`,
+    `CreateBrushIndirect`, `CreateFontIndirectW`, `CreateFontIndirectA`,
+    `CreateCompatibleBitmap`, `CreateBitmap`, `GetTextMetricsW`,
+    `GetTextMetricsA`, `GetTextExtentPoint32W`, `SetMapMode`, `GetMapMode`,
+    `SetBkMode`, `GetBkMode`, `SetBkColor`, `GetBkColor`, `SetTextColor`,
+    `GetTextColor`, `GetSysColor`, and `GetSysColorBrush`) and hooked
+    `gdi32.dll` delay-load tables so `msvbvm60.dll` runtime initialization
+    succeeds in headless containers.
+  - Implemented registration-free embedded TypeLib redirection
+    (`Shim_SxsOleAut32RedirectTypeLibrary`) and hooked `oleaut32.dll`'s
+    `ext-ms-win-sxs-oleautomation-l1-1-0` delay-load table so
+    `oleaut32!LoadRegTypeLib` resolves `TYPELIB` resources embedded inside
+    loaded in-process COM DLLs via `LoadTypeLibEx(..., REGKIND_NONE, ...)`
+    without `HKEY_CLASSES_ROOT\TypeLib` registry entries or Windows SxS.
+- Added native regression tests (`VB6_ansi_*` and `VB6_headless_*` in
+  `sta-shim/tests/native_regression.cpp`) and installer regression checks
+  (`R02_verified_PE32_ole32_exports` and `R02_optional_vb6_runtime_copied` in
+  `sta-shim/tests/installer_regression.cpp`).
+- Documented the architecture of legacy 32-bit Visual Basic 6 ActiveX/COM
+  calculation libraries and the 5-stage diagnostic/engineering methodology for
+  discovering and filling Nano Server OS gaps in `README.md`.
+
+### Changed
+
+- Updated `sta-shim/build_shim.ps1` to sync `msvbvm60.dll` into all five
+  WoW64-enabled flavour folders and link `gdi32.lib` into
+  `NativeShimRegression_x86.exe` and `NativeShimRegression_x64.exe`.
+- Updated all six flavour `push.ps1` scripts and `README.md` tag examples to
+  container revision `1.4.0` (`-v1.4.0`, `-v1.4`, `-v1`).
+
 ## 1.3.0 - 2026-10-30
 
 ### Added

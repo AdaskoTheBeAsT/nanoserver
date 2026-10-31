@@ -7,14 +7,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <oaidl.h>
 #include <stdio.h>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <bitset>
 #include <memory>
-
-extern "C" HRESULT WINAPI CoInitializeEx(LPVOID pvReserved, DWORD dwCoInit);
 
 namespace {
 
@@ -92,6 +91,7 @@ struct ModuleHookState {
 struct WindowClassEntry {
     ATOM Atom = 0;
     std::wstring ClassName;
+    std::string ClassNameA;
     UINT Style = 0;
     WNDPROC WndProc = nullptr;
     int ClsExtra = 0;
@@ -102,6 +102,7 @@ struct WindowClassEntry {
     HCURSOR Cursor = nullptr;
     HBRUSH Background = nullptr;
     std::wstring MenuName;
+    std::string MenuNameA;
     LPCWSTR MenuResource = nullptr;
 };
 
@@ -208,6 +209,8 @@ CoInitializeExFn g_OrigCoInitializeEx = nullptr;
 const char* const kShimmedPrefixes[] = {
     "ext-ms-win-rtcore-ntuser-window-ext-l1-",
     "ext-ms-win-rtcore-ntuser-synch-ext-l1-",
+    "ext-ms-win-rtcore-ntuser-",
+    "ext-ms-win-rtcore-gdi-",
     "ext-ms-win-ntuser-message-l1-",
     "ext-ms-win-ntuser-synch-l1-",
     "ext-ms-win-ntuser-window-l1-",
@@ -215,7 +218,10 @@ const char* const kShimmedPrefixes[] = {
     "ext-ms-win-ntuser-windowstation-l1-",
     "ext-ms-win-ntuser-private-l1-",
     "ext-ms-win-ntuser-misc-l1-",
+    "ext-ms-win-ntuser-",
+    "ext-ms-win-gdi-",
     "ext-ms-win-com-sta-l1-",
+    "ext-ms-win-sxs-oleautomation-l1-",
 };
 
 VOID CALLBACK OnQueueThreadExit(PVOID value);
@@ -246,6 +252,24 @@ private:
 
 char ToLowerAscii(char c) {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+std::string WideToAnsi(const std::wstring& wstr) {
+    if (wstr.empty()) return {};
+    int needed = WideCharToMultiByte(CP_ACP, 0, wstr.data(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return {};
+    std::string result(static_cast<size_t>(needed), '\0');
+    WideCharToMultiByte(CP_ACP, 0, wstr.data(), static_cast<int>(wstr.size()), &result[0], needed, nullptr, nullptr);
+    return result;
+}
+
+std::wstring AnsiToWide(const char* str) {
+    if (!str || !*str) return {};
+    int needed = MultiByteToWideChar(CP_ACP, 0, str, -1, nullptr, 0);
+    if (needed <= 1) return {};
+    std::wstring result(static_cast<size_t>(needed - 1), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, str, -1, &result[0], needed);
+    return result;
 }
 
 wchar_t ToLowerWide(wchar_t c) {
@@ -678,6 +702,7 @@ bool GetSystemClass(LPCWSTR name, WindowClassEntry& entry) {
     for (const auto* systemName : names) {
         if (EqualsIgnoreCaseWide(lookup, systemName)) {
             entry.ClassName = systemName;
+            entry.ClassNameA = WideToAnsi(entry.ClassName);
             entry.Style = CS_GLOBALCLASS;
             entry.WndProc = Shim_DefWindowProcW;
             return true;
@@ -719,6 +744,7 @@ ATOM RegisterClassCommon(const WNDCLASSEXW& source) {
     WindowClassEntry entry;
     entry.Atom = static_cast<ATOM>(0xC000u + index);
     entry.ClassName = source.lpszClassName;
+    entry.ClassNameA = WideToAnsi(entry.ClassName);
     entry.Style = source.style;
     entry.WndProc = source.lpfnWndProc;
     entry.ClsExtra = source.cbClsExtra;
@@ -728,8 +754,12 @@ ATOM RegisterClassCommon(const WNDCLASSEXW& source) {
     entry.SmallIcon = source.hIconSm;
     entry.Cursor = source.hCursor;
     entry.Background = source.hbrBackground;
-    if (source.lpszMenuName && !IsClassAtom(source.lpszMenuName)) entry.MenuName = source.lpszMenuName;
-    else entry.MenuResource = source.lpszMenuName;
+    if (source.lpszMenuName && !IsClassAtom(source.lpszMenuName)) {
+        entry.MenuName = source.lpszMenuName;
+        entry.MenuNameA = WideToAnsi(entry.MenuName);
+    } else {
+        entry.MenuResource = source.lpszMenuName;
+    }
     g_WindowClasses.push_back(std::move(entry));
     g_ClassAtoms.set(index);
     if (!sharedAtom) g_NextAtom = (index + 1) & 0x3FFFu;
@@ -791,7 +821,7 @@ BOOL WINAPI Shim_UnregisterClassW(LPCWSTR name, HINSTANCE instance) {
 }
 
 extern "C" BOOL WINAPI Shim_GetClassInfoExW(HINSTANCE instance, LPCWSTR name, WNDCLASSEXW* output) {
-    if (!output || output->cbSize != sizeof(WNDCLASSEXW)) {
+    if (!output || !name) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -1566,6 +1596,1457 @@ extern "C" BOOL WINAPI Shim_ImageList_SetIconSize(PVOID himl, int cx, int cy) {
     return TRUE;
 }
 
+// --- ANSI Windowing, Class Registration, Message Queue & Clipboard Shims ---
+
+ATOM WINAPI Shim_RegisterClassA(const WNDCLASSA* source) {
+    if (!source || !source->lpszClassName) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    std::wstring classNameW;
+    LPCWSTR classNamePtr = nullptr;
+    if (IsClassAtom(reinterpret_cast<LPCWSTR>(source->lpszClassName))) {
+        classNamePtr = reinterpret_cast<LPCWSTR>(source->lpszClassName);
+    } else {
+        classNameW = AnsiToWide(source->lpszClassName);
+        classNamePtr = classNameW.c_str();
+    }
+    std::wstring menuNameW;
+    LPCWSTR menuNamePtr = nullptr;
+    if (source->lpszMenuName) {
+        if (IsClassAtom(reinterpret_cast<LPCWSTR>(source->lpszMenuName))) {
+            menuNamePtr = reinterpret_cast<LPCWSTR>(source->lpszMenuName);
+        } else {
+            menuNameW = AnsiToWide(source->lpszMenuName);
+            menuNamePtr = menuNameW.c_str();
+        }
+    }
+    WNDCLASSEXW extended{};
+    extended.cbSize = sizeof(extended);
+    extended.style = source->style;
+    extended.lpfnWndProc = source->lpfnWndProc;
+    extended.cbClsExtra = source->cbClsExtra;
+    extended.cbWndExtra = source->cbWndExtra;
+    extended.hInstance = source->hInstance;
+    extended.hIcon = source->hIcon;
+    extended.hCursor = source->hCursor;
+    extended.hbrBackground = source->hbrBackground;
+    extended.lpszMenuName = menuNamePtr;
+    extended.lpszClassName = classNamePtr;
+    return RegisterClassCommon(extended);
+}
+
+ATOM WINAPI Shim_RegisterClassExA(const WNDCLASSEXA* source) {
+    if (!source || source->cbSize != sizeof(WNDCLASSEXA) || !source->lpszClassName) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    std::wstring classNameW;
+    LPCWSTR classNamePtr = nullptr;
+    if (IsClassAtom(reinterpret_cast<LPCWSTR>(source->lpszClassName))) {
+        classNamePtr = reinterpret_cast<LPCWSTR>(source->lpszClassName);
+    } else {
+        classNameW = AnsiToWide(source->lpszClassName);
+        classNamePtr = classNameW.c_str();
+    }
+    std::wstring menuNameW;
+    LPCWSTR menuNamePtr = nullptr;
+    if (source->lpszMenuName) {
+        if (IsClassAtom(reinterpret_cast<LPCWSTR>(source->lpszMenuName))) {
+            menuNamePtr = reinterpret_cast<LPCWSTR>(source->lpszMenuName);
+        } else {
+            menuNameW = AnsiToWide(source->lpszMenuName);
+            menuNamePtr = menuNameW.c_str();
+        }
+    }
+    WNDCLASSEXW extended{};
+    extended.cbSize = sizeof(extended);
+    extended.style = source->style;
+    extended.lpfnWndProc = source->lpfnWndProc;
+    extended.cbClsExtra = source->cbClsExtra;
+    extended.cbWndExtra = source->cbWndExtra;
+    extended.hInstance = source->hInstance;
+    extended.hIcon = source->hIcon;
+    extended.hCursor = source->hCursor;
+    extended.hbrBackground = source->hbrBackground;
+    extended.lpszMenuName = menuNamePtr;
+    extended.lpszClassName = classNamePtr;
+    extended.hIconSm = source->hIconSm;
+    return RegisterClassCommon(extended);
+}
+
+BOOL WINAPI Shim_UnregisterClassA(LPCSTR name, HINSTANCE instance) {
+    if (!name) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (IsClassAtom(reinterpret_cast<LPCWSTR>(name))) {
+        return Shim_UnregisterClassW(reinterpret_cast<LPCWSTR>(name), instance);
+    }
+    std::wstring nameW = AnsiToWide(name);
+    return Shim_UnregisterClassW(nameW.c_str(), instance);
+}
+
+BOOL WINAPI Shim_GetClassInfoExA(HINSTANCE instance, LPCSTR name, WNDCLASSEXA* output) {
+    if (!output || !name) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    std::wstring nameW;
+    LPCWSTR lookup = nullptr;
+    if (IsClassAtom(reinterpret_cast<LPCWSTR>(name))) {
+        lookup = reinterpret_cast<LPCWSTR>(name);
+    } else {
+        nameW = AnsiToWide(name);
+        lookup = nameW.c_str();
+    }
+    ScopedLock lock(g_WindowLock);
+    WindowClassEntry system;
+    WindowClassEntry* entry = FindClassLocked(lookup, instance);
+    if (!entry && GetSystemClass(lookup, system)) entry = &system;
+    if (!entry) {
+        SetLastError(ERROR_CLASS_DOES_NOT_EXIST);
+        return FALSE;
+    }
+    output->style = entry->Style;
+    output->lpfnWndProc = entry->WndProc;
+    output->cbClsExtra = entry->ClsExtra;
+    output->cbWndExtra = entry->WndExtra;
+    output->hInstance = entry->HInstance;
+    output->hIcon = entry->Icon;
+    output->hIconSm = entry->SmallIcon;
+    output->hCursor = entry->Cursor;
+    output->hbrBackground = entry->Background;
+    output->lpszMenuName = entry->MenuNameA.empty()
+        ? reinterpret_cast<LPCSTR>(entry->MenuResource)
+        : entry->MenuNameA.c_str();
+    output->lpszClassName = IsClassAtom(lookup) ? name : entry->ClassNameA.c_str();
+    return entry->Atom ? entry->Atom : TRUE;
+}
+
+BOOL WINAPI Shim_GetClassInfoA(HINSTANCE instance, LPCSTR name, WNDCLASSA* output) {
+    if (!output || !name) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    WNDCLASSEXA extended{};
+    extended.cbSize = sizeof(extended);
+    BOOL atom = Shim_GetClassInfoExA(instance, name, &extended);
+    if (!atom) return FALSE;
+    output->style = extended.style;
+    output->lpfnWndProc = extended.lpfnWndProc;
+    output->cbClsExtra = extended.cbClsExtra;
+    output->cbWndExtra = extended.cbWndExtra;
+    output->hInstance = extended.hInstance;
+    output->hIcon = extended.hIcon;
+    output->hCursor = extended.hCursor;
+    output->hbrBackground = extended.hbrBackground;
+    output->lpszMenuName = extended.lpszMenuName;
+    output->lpszClassName = extended.lpszClassName;
+    return atom;
+}
+
+int WINAPI Shim_GetClassNameW(HWND hWnd, LPWSTR lpClassName, int nMaxCount) {
+    if (!lpClassName || nMaxCount <= 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    ScopedLock lock(g_WindowLock);
+    WindowEntry* entry = FindWindowLocked(hWnd);
+    if (!entry) {
+        SetLastError(kErrorInvalidWindowHandle);
+        return 0;
+    }
+    int count = (std::min)(static_cast<int>(entry->ClassName.size()), nMaxCount - 1);
+    if (count > 0) {
+        memcpy(lpClassName, entry->ClassName.data(), static_cast<size_t>(count) * sizeof(wchar_t));
+    }
+    lpClassName[count] = L'\0';
+    return count;
+}
+
+int WINAPI Shim_GetClassNameA(HWND hWnd, LPSTR lpClassName, int nMaxCount) {
+    if (!lpClassName || nMaxCount <= 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    wchar_t wideBuf[256]{};
+    int wideLen = Shim_GetClassNameW(hWnd, wideBuf, 256);
+    if (wideLen <= 0) {
+        lpClassName[0] = '\0';
+        return 0;
+    }
+    int written = WideCharToMultiByte(CP_ACP, 0, wideBuf, wideLen, lpClassName, nMaxCount - 1, nullptr, nullptr);
+    if (written < 0) written = 0;
+    lpClassName[written] = '\0';
+    return written;
+}
+
+DWORD WINAPI Shim_GetClassLongW(HWND hWnd, int nIndex) {
+    ScopedLock lock(g_WindowLock);
+    WindowEntry* win = FindWindowLocked(hWnd);
+    if (!win) {
+        SetLastError(kErrorInvalidWindowHandle);
+        return 0;
+    }
+    if (nIndex == -32 /* GCW_ATOM */) {
+        return win->ClassAtom ? win->ClassAtom : 0xC001u;
+    }
+    if (nIndex == -26 /* GCL_STYLE */) {
+        for (const auto& cls : g_WindowClasses) {
+            if (cls.Atom == win->ClassAtom) return cls.Style;
+        }
+    }
+    return 0;
+}
+
+DWORD WINAPI Shim_GetClassLongA(HWND hWnd, int nIndex) {
+    return Shim_GetClassLongW(hWnd, nIndex);
+}
+
+DWORD WINAPI Shim_SetClassLongW(HWND hWnd, int nIndex, LONG dwNewLong) {
+    (void)hWnd;
+    (void)nIndex;
+    return static_cast<DWORD>(dwNewLong);
+}
+
+DWORD WINAPI Shim_SetClassLongA(HWND hWnd, int nIndex, LONG dwNewLong) {
+    return Shim_SetClassLongW(hWnd, nIndex, dwNewLong);
+}
+
+HWND WINAPI Shim_CreateWindowExA(
+    DWORD exStyle, LPCSTR className, LPCSTR windowName, DWORD style, int x, int y, int width, int height,
+    HWND parent, HMENU menu, HINSTANCE instance, LPVOID param) {
+    std::wstring classNameW;
+    LPCWSTR classNamePtr = nullptr;
+    if (IsClassAtom(reinterpret_cast<LPCWSTR>(className))) {
+        classNamePtr = reinterpret_cast<LPCWSTR>(className);
+    } else if (className) {
+        classNameW = AnsiToWide(className);
+        classNamePtr = classNameW.c_str();
+    }
+    std::wstring windowNameW;
+    LPCWSTR windowNamePtr = nullptr;
+    if (windowName) {
+        windowNameW = AnsiToWide(windowName);
+        windowNamePtr = windowNameW.c_str();
+    }
+    return Shim_CreateWindowExW(exStyle, classNamePtr, windowNamePtr, style, x, y, width, height, parent, menu, instance, param);
+}
+
+LRESULT WINAPI Shim_DefWindowProcA(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    return Shim_DefWindowProcW(hWnd, message, wParam, lParam);
+}
+
+LRESULT WINAPI Shim_CallWindowProcA(WNDPROC previous, HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    return Shim_CallWindowProcW(previous, hWnd, message, wParam, lParam);
+}
+
+LONG_PTR WINAPI Shim_GetWindowLongPtrA(HWND hWnd, int index) {
+    return Shim_GetWindowLongPtrW(hWnd, index);
+}
+
+LONG_PTR WINAPI Shim_SetWindowLongPtrA(HWND hWnd, int index, LONG_PTR value) {
+    return Shim_SetWindowLongPtrW(hWnd, index, value);
+}
+
+LONG WINAPI Shim_GetWindowLongA(HWND hWnd, int index) {
+    return Shim_GetWindowLongW(hWnd, index);
+}
+
+LONG WINAPI Shim_SetWindowLongA(HWND hWnd, int index, LONG value) {
+    return Shim_SetWindowLongW(hWnd, index, value);
+}
+
+BOOL WINAPI Shim_PeekMessageA(LPMSG output, HWND filterWindow, UINT minimum, UINT maximum, UINT removeFlags) {
+    return Shim_PeekMessageW(output, filterWindow, minimum, maximum, removeFlags);
+}
+
+BOOL WINAPI Shim_GetMessageA(LPMSG output, HWND filterWindow, UINT minimum, UINT maximum) {
+    return Shim_GetMessageW(output, filterWindow, minimum, maximum);
+}
+
+LRESULT WINAPI Shim_DispatchMessageA(const MSG* message) {
+    return Shim_DispatchMessageW(message);
+}
+
+BOOL WINAPI Shim_PostMessageA(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    return Shim_PostMessageW(hWnd, message, wParam, lParam);
+}
+
+BOOL WINAPI Shim_PostThreadMessageA(DWORD threadId, UINT message, WPARAM wParam, LPARAM lParam) {
+    return Shim_PostThreadMessageW(threadId, message, wParam, lParam);
+}
+
+LRESULT WINAPI Shim_SendMessageA(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    return Shim_SendMessageW(hWnd, message, wParam, lParam);
+}
+
+UINT WINAPI Shim_RegisterClipboardFormatA(LPCSTR name) {
+    if (!name || !*name) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    std::wstring nameW = AnsiToWide(name);
+    return Shim_RegisterClipboardFormatW(nameW.c_str());
+}
+
+int WINAPI Shim_GetClipboardFormatNameA(UINT format, LPSTR output, int capacity) {
+    if (!output || capacity <= 0) return 0;
+    wchar_t wideBuf[256]{};
+    int wideLen = Shim_GetClipboardFormatNameW(format, wideBuf, 256);
+    if (wideLen <= 0) return 0;
+    int written = WideCharToMultiByte(CP_ACP, 0, wideBuf, wideLen, output, capacity - 1, nullptr, nullptr);
+    if (written <= 0) return 0;
+    output[written] = '\0';
+    return written;
+}
+
+// --- Headless GDI, DC, Stock Object, Font, Metric, and Color Shims ---
+
+HGDIOBJ WINAPI Shim_GetStockObject(int index) {
+    if (index < 0 || index > 32) return nullptr;
+    return reinterpret_cast<HGDIOBJ>(static_cast<ULONG_PTR>(0x53484F00u + static_cast< UINT>(index)));
+}
+
+HDC WINAPI Shim_GetDC(HWND hWnd) {
+    (void)hWnd;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+}
+
+HDC WINAPI Shim_GetDCEx(HWND hWnd, HRGN hrgnClip, DWORD flags) {
+    (void)hWnd;
+    (void)hrgnClip;
+    (void)flags;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+}
+
+HDC WINAPI Shim_GetWindowDC(HWND hWnd) {
+    (void)hWnd;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+}
+
+int WINAPI Shim_ReleaseDC(HWND hWnd, HDC hDC) {
+    (void)hWnd;
+    (void)hDC;
+    return 1;
+}
+
+HDC WINAPI Shim_CreateCompatibleDC(HDC hDC) {
+    (void)hDC;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+}
+
+BOOL WINAPI Shim_DeleteDC(HDC hDC) {
+    (void)hDC;
+    return TRUE;
+}
+
+int WINAPI Shim_SaveDC(HDC hDC) {
+    (void)hDC;
+    return 1;
+}
+
+BOOL WINAPI Shim_RestoreDC(HDC hDC, int nSavedDC) {
+    (void)hDC;
+    (void)nSavedDC;
+    return TRUE;
+}
+
+int WINAPI Shim_GetDeviceCaps(HDC hDC, int index) {
+    (void)hDC;
+    switch (index) {
+        case 0:  /* DRIVERVERSION */ return 0x400;
+        case 2:  /* TECHNOLOGY */    return 1; /* DT_RASDISPLAY */
+        case 4:  /* HORZSIZE */      return 320;
+        case 6:  /* VERTSIZE */      return 240;
+        case 8:  /* HORZRES */       return 1024;
+        case 10: /* VERTRES */       return 768;
+        case 12: /* BITSPIXEL */     return 32;
+        case 14: /* PLANES */        return 1;
+        case 16: /* NUMBRUSHES */    return -1;
+        case 18: /* NUMPENS */       return -1;
+        case 22: /* NUMFONTS */      return 0;
+        case 24: /* NUMCOLORS */     return -1;
+        case 36: /* ASPECTX */       return 36;
+        case 38: /* ASPECTY */       return 36;
+        case 40: /* ASPECTXY */      return 51;
+        case 34: /* RASTERCAPS */    return 0x7E99;
+        case 88: /* LOGPIXELSX */    return 96;
+        case 90: /* LOGPIXELSY */    return 96;
+        case 104:/* SIZEPALETTE */   return 0;
+        case 106:/* NUMRESERVED */   return 20;
+        case 108:/* COLORRES */      return 24;
+        case 117:/* DESKTOPVERTRES */return 768;
+        case 118:/* DESKTOPHORZRES */return 1024;
+        default:                     return 0;
+    }
+}
+
+int WINAPI Shim_GetSystemMetrics(int index) {
+    switch (index) {
+        case 0:  /* SM_CXSCREEN */      return 1024;
+        case 1:  /* SM_CYSCREEN */      return 768;
+        case 2:  /* SM_CXVSCROLL */     return 16;
+        case 3:  /* SM_CYHSCROLL */     return 16;
+        case 4:  /* SM_CYCAPTION */     return 22;
+        case 5:  /* SM_CXBORDER */      return 1;
+        case 6:  /* SM_CYBORDER */      return 1;
+        case 7:  /* SM_CXDLGFRAME */    return 3;
+        case 8:  /* SM_CYDLGFRAME */    return 3;
+        case 11: /* SM_CXICON */        return 32;
+        case 12: /* SM_CYICON */        return 32;
+        case 13: /* SM_CXCURSOR */      return 32;
+        case 14: /* SM_CYCURSOR */      return 32;
+        case 15: /* SM_CYMENU */        return 19;
+        case 16: /* SM_CXFULLSCREEN */  return 1024;
+        case 17: /* SM_CYFULLSCREEN */  return 746;
+        case 32: /* SM_CXFRAME */       return 4;
+        case 33: /* SM_CYFRAME */       return 4;
+        case 49: /* SM_CXSMICON */      return 16;
+        case 50: /* SM_CYSMICON */      return 16;
+        case 78: /* SM_CXVIRTUALSCREEN */ return 1024;
+        case 79: /* SM_CYVIRTUALSCREEN */ return 768;
+        case 80: /* SM_CMONITORS */     return 1;
+        default:                        return 0;
+    }
+}
+
+int WINAPI Shim_GetObjectW(HANDLE h, int c, LPVOID pv) {
+    (void)h;
+    if (!pv) return sizeof(LOGFONTW);
+    if (c <= 0) return 0;
+    memset(pv, 0, static_cast<size_t>(c));
+    if (c >= static_cast<int>(sizeof(LOGFONTW))) {
+        auto* lf = static_cast<LOGFONTW*>(pv);
+        lf->lfHeight = -12;
+        lf->lfWeight = 400;
+        lf->lfCharSet = 1;
+        wcscpy_s(lf->lfFaceName, L"MS Sans Serif");
+        return sizeof(LOGFONTW);
+    }
+    if (c >= static_cast<int>(sizeof(BITMAP))) {
+        auto* bm = static_cast<BITMAP*>(pv);
+        bm->bmWidth = 16;
+        bm->bmHeight = 16;
+        bm->bmWidthBytes = 64;
+        bm->bmPlanes = 1;
+        bm->bmBitsPixel = 32;
+        return sizeof(BITMAP);
+    }
+    return c;
+}
+
+int WINAPI Shim_GetObjectA(HANDLE h, int c, LPVOID pv) {
+    (void)h;
+    if (!pv) return sizeof(LOGFONTA);
+    if (c <= 0) return 0;
+    memset(pv, 0, static_cast<size_t>(c));
+    if (c >= static_cast<int>(sizeof(LOGFONTA))) {
+        auto* lf = static_cast<LOGFONTA*>(pv);
+        lf->lfHeight = -12;
+        lf->lfWeight = 400;
+        lf->lfCharSet = 1;
+        strcpy_s(lf->lfFaceName, "MS Sans Serif");
+        return sizeof(LOGFONTA);
+    }
+    if (c >= static_cast<int>(sizeof(BITMAP))) {
+        auto* bm = static_cast<BITMAP*>(pv);
+        bm->bmWidth = 16;
+        bm->bmHeight = 16;
+        bm->bmWidthBytes = 64;
+        bm->bmPlanes = 1;
+        bm->bmBitsPixel = 32;
+        return sizeof(BITMAP);
+    }
+    return c;
+}
+
+DWORD WINAPI Shim_GetObjectType(HGDIOBJ h) {
+    return h ? 7 /* OBJ_BITMAP */ : 0;
+}
+
+HGDIOBJ WINAPI Shim_GetCurrentObject(HDC hdc, UINT type) {
+    (void)hdc;
+    return reinterpret_cast<HGDIOBJ>(static_cast<ULONG_PTR>(0x53484F40u + (type & 0x1Fu)));
+}
+
+HGDIOBJ WINAPI Shim_SelectObject(HDC hdc, HGDIOBJ h) {
+    (void)hdc;
+    return h ? h : reinterpret_cast<HGDIOBJ>(static_cast<ULONG_PTR>(0x53484F01u));
+}
+
+BOOL WINAPI Shim_DeleteObject(HGDIOBJ ho) {
+    (void)ho;
+    return TRUE;
+}
+
+HBRUSH WINAPI Shim_CreateSolidBrush(COLORREF color) {
+    (void)color;
+    return reinterpret_cast<HBRUSH>(static_cast<ULONG_PTR>(0x53484201u));
+}
+
+HBRUSH WINAPI Shim_CreateBrushIndirect(const LOGBRUSH* plbrush) {
+    (void)plbrush;
+    return reinterpret_cast<HBRUSH>(static_cast<ULONG_PTR>(0x53484202u));
+}
+
+HFONT WINAPI Shim_CreateFontIndirectW(const LOGFONTW* lplf) {
+    (void)lplf;
+    return reinterpret_cast<HFONT>(static_cast<ULONG_PTR>(0x53484601u));
+}
+
+HFONT WINAPI Shim_CreateFontIndirectA(const LOGFONTA* lplf) {
+    (void)lplf;
+    return reinterpret_cast<HFONT>(static_cast<ULONG_PTR>(0x53484602u));
+}
+
+HBITMAP WINAPI Shim_CreateCompatibleBitmap(HDC hdc, int cx, int cy) {
+    (void)hdc;
+    (void)cx;
+    (void)cy;
+    return reinterpret_cast<HBITMAP>(static_cast<ULONG_PTR>(0x53484D10u));
+}
+
+HBITMAP WINAPI Shim_CreateBitmap(int nWidth, int nHeight, UINT nPlanes, UINT nBitCount, const VOID* lpBits) {
+    (void)nWidth;
+    (void)nHeight;
+    (void)nPlanes;
+    (void)nBitCount;
+    (void)lpBits;
+    return reinterpret_cast<HBITMAP>(static_cast<ULONG_PTR>(0x53484D11u));
+}
+
+BOOL WINAPI Shim_GetTextMetricsW(HDC hdc, LPTEXTMETRICW lptm) {
+    (void)hdc;
+    if (!lptm) return FALSE;
+    memset(lptm, 0, sizeof(*lptm));
+    lptm->tmHeight = 16;
+    lptm->tmAscent = 13;
+    lptm->tmDescent = 3;
+    lptm->tmAveCharWidth = 7;
+    lptm->tmMaxCharWidth = 14;
+    lptm->tmWeight = 400;
+    lptm->tmFirstChar = 32;
+    lptm->tmLastChar = 255;
+    lptm->tmDefaultChar = 32;
+    lptm->tmBreakChar = 32;
+    lptm->tmCharSet = 1;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_GetTextMetricsA(HDC hdc, LPTEXTMETRICA lptm) {
+    (void)hdc;
+    if (!lptm) return FALSE;
+    memset(lptm, 0, sizeof(*lptm));
+    lptm->tmHeight = 16;
+    lptm->tmAscent = 13;
+    lptm->tmDescent = 3;
+    lptm->tmAveCharWidth = 7;
+    lptm->tmMaxCharWidth = 14;
+    lptm->tmWeight = 400;
+    lptm->tmFirstChar = 32;
+    lptm->tmLastChar = 255;
+    lptm->tmDefaultChar = 32;
+    lptm->tmBreakChar = 32;
+    lptm->tmCharSet = 1;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_GetTextExtentPoint32W(HDC hdc, LPCWSTR lpString, int c, LPSIZE psizl) {
+    (void)hdc;
+    if (!psizl) return FALSE;
+    if (c < 0) c = lpString ? static_cast<int>(wcslen(lpString)) : 0;
+    psizl->cx = (c > 0) ? (c * 8) : 0;
+    psizl->cy = 16;
+    return TRUE;
+}
+
+int WINAPI Shim_SetMapMode(HDC hdc, int mode) {
+    (void)hdc;
+    (void)mode;
+    return 1 /* MM_TEXT */;
+}
+
+int WINAPI Shim_GetMapMode(HDC hdc) {
+    (void)hdc;
+    return 1 /* MM_TEXT */;
+}
+
+int WINAPI Shim_SetBkMode(HDC hdc, int mode) {
+    (void)hdc;
+    (void)mode;
+    return 2 /* OPAQUE */;
+}
+
+int WINAPI Shim_GetBkMode(HDC hdc) {
+    (void)hdc;
+    return 2 /* OPAQUE */;
+}
+
+COLORREF WINAPI Shim_SetBkColor(HDC hdc, COLORREF color) {
+    (void)hdc;
+    return color;
+}
+
+COLORREF WINAPI Shim_GetBkColor(HDC hdc) {
+    (void)hdc;
+    return 0x00FFFFFFu;
+}
+
+COLORREF WINAPI Shim_SetTextColor(HDC hdc, COLORREF color) {
+    (void)hdc;
+    return color;
+}
+
+COLORREF WINAPI Shim_GetTextColor(HDC hdc) {
+    (void)hdc;
+    return 0;
+}
+
+DWORD WINAPI Shim_GetSysColor(int nIndex) {
+    (void)nIndex;
+    return 0x00FFFFFFu;
+}
+
+HBRUSH WINAPI Shim_GetSysColorBrush(int nIndex) {
+    return reinterpret_cast<HBRUSH>(static_cast<ULONG_PTR>(0x53484280u + (nIndex & 0x3Fu)));
+}
+
+HICON WINAPI Shim_LoadIconA(HINSTANCE hInstance, LPCSTR lpIconName) {
+    (void)hInstance;
+    (void)lpIconName;
+    return reinterpret_cast<HICON>(static_cast<ULONG_PTR>(0x53484901u));
+}
+
+HICON WINAPI Shim_LoadIconW(HINSTANCE hInstance, LPCWSTR lpIconName) {
+    (void)hInstance;
+    (void)lpIconName;
+    return reinterpret_cast<HICON>(static_cast<ULONG_PTR>(0x53484901u));
+}
+
+HCURSOR WINAPI Shim_LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) {
+    (void)hInstance;
+    (void)lpCursorName;
+    return reinterpret_cast<HCURSOR>(static_cast<ULONG_PTR>(0x53484301u));
+}
+
+HCURSOR WINAPI Shim_LoadCursorW(HINSTANCE hInstance, LPCWSTR lpCursorName) {
+    (void)hInstance;
+    (void)lpCursorName;
+    return reinterpret_cast<HCURSOR>(static_cast<ULONG_PTR>(0x53484301u));
+}
+
+HANDLE WINAPI Shim_LoadImageA(HINSTANCE hInst, LPCSTR name, UINT type, int cx, int cy, UINT fuLoad) {
+    (void)hInst;
+    (void)name;
+    (void)type;
+    (void)cx;
+    (void)cy;
+    (void)fuLoad;
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484902u));
+}
+
+HANDLE WINAPI Shim_LoadImageW(HINSTANCE hInst, LPCWSTR name, UINT type, int cx, int cy, UINT fuLoad) {
+    (void)hInst;
+    (void)name;
+    (void)type;
+    (void)cx;
+    (void)cy;
+    (void)fuLoad;
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484902u));
+}
+
+BOOL WINAPI Shim_SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni) {
+    (void)uiParam;
+    (void)fWinIni;
+    if (uiAction == 0x0030 /* SPI_GETWORKAREA */ && pvParam) {
+        auto* rc = static_cast<RECT*>(pvParam);
+        rc->left = 0;
+        rc->top = 0;
+        rc->right = 1024;
+        rc->bottom = 768;
+        return TRUE;
+    }
+    return TRUE;
+}
+
+BOOL WINAPI Shim_SystemParametersInfoW(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni) {
+    return Shim_SystemParametersInfoA(uiAction, uiParam, pvParam, fWinIni);
+}
+
+BOOL WINAPI Shim_SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags) {
+    (void)hWnd;
+    (void)hWndInsertAfter;
+    (void)X;
+    (void)Y;
+    (void)cx;
+    (void)cy;
+    (void)uFlags;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_ShowWindow(HWND hWnd, int nCmdShow) {
+    (void)hWnd;
+    (void)nCmdShow;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_MoveWindow(HWND hWnd, int X, int Y, int nWidth, int nHeight, BOOL bRepaint) {
+    (void)hWnd;
+    (void)X;
+    (void)Y;
+    (void)nWidth;
+    (void)nHeight;
+    (void)bRepaint;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_EnableWindow(HWND hWnd, BOOL bEnable) {
+    (void)hWnd;
+    (void)bEnable;
+    return FALSE;
+}
+
+BOOL WINAPI Shim_IsWindowVisible(HWND hWnd) {
+    (void)hWnd;
+    return FALSE;
+}
+
+BOOL WINAPI Shim_IsWindowEnabled(HWND hWnd) {
+    return Shim_IsWindow(hWnd);
+}
+
+BOOL WINAPI Shim_IsIconic(HWND hWnd) {
+    (void)hWnd;
+    return FALSE;
+}
+
+BOOL WINAPI Shim_IsZoomed(HWND hWnd) {
+    (void)hWnd;
+    return FALSE;
+}
+
+BOOL WINAPI Shim_GetClientRect(HWND hWnd, LPRECT lpRect) {
+    (void)hWnd;
+    if (!lpRect) return FALSE;
+    lpRect->left = 0;
+    lpRect->top = 0;
+    lpRect->right = 100;
+    lpRect->bottom = 100;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_GetWindowRect(HWND hWnd, LPRECT lpRect) {
+    return Shim_GetClientRect(hWnd, lpRect);
+}
+
+HWND WINAPI Shim_GetDesktopWindow() {
+    return reinterpret_cast<HWND>(static_cast<ULONG_PTR>(0x10010u));
+}
+
+HWND WINAPI Shim_GetParent(HWND hWnd) {
+    ScopedLock lock(g_WindowLock);
+    WindowEntry* entry = FindWindowLocked(hWnd);
+    return entry ? entry->Parent : nullptr;
+}
+
+HWND WINAPI Shim_SetParent(HWND hWndChild, HWND hWndNewParent) {
+    ScopedLock lock(g_WindowLock);
+    WindowEntry* entry = FindWindowLocked(hWndChild);
+    if (!entry) return nullptr;
+    HWND prev = entry->Parent;
+    entry->Parent = hWndNewParent;
+    return prev;
+}
+
+HWND WINAPI Shim_GetWindow(HWND hWnd, UINT uCmd) {
+    (void)hWnd;
+    (void)uCmd;
+    return nullptr;
+}
+
+HWND WINAPI Shim_GetTopWindow(HWND hWnd) {
+    (void)hWnd;
+    return nullptr;
+}
+
+HWND WINAPI Shim_GetFocus() {
+    return nullptr;
+}
+
+HWND WINAPI Shim_SetFocus(HWND hWnd) {
+    return hWnd;
+}
+
+HWND WINAPI Shim_GetActiveWindow() {
+    return nullptr;
+}
+
+HWND WINAPI Shim_SetActiveWindow(HWND hWnd) {
+    return hWnd;
+}
+
+HWND WINAPI Shim_GetForegroundWindow() {
+    return nullptr;
+}
+
+BOOL WINAPI Shim_SetForegroundWindow(HWND hWnd) {
+    (void)hWnd;
+    return TRUE;
+}
+
+HWND WINAPI Shim_GetCapture() {
+    return nullptr;
+}
+
+HWND WINAPI Shim_SetCapture(HWND hWnd) {
+    return hWnd;
+}
+
+BOOL WINAPI Shim_ReleaseCapture() {
+    return TRUE;
+}
+
+BOOL WINAPI Shim_ClientToScreen(HWND hWnd, LPPOINT lpPoint) {
+    (void)hWnd;
+    (void)lpPoint;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_ScreenToClient(HWND hWnd, LPPOINT lpPoint) {
+    (void)hWnd;
+    (void)lpPoint;
+    return TRUE;
+}
+
+int WINAPI Shim_MapWindowPoints(HWND hWndFrom, HWND hWndTo, LPPOINT lpPoints, UINT cPoints) {
+    (void)hWndFrom;
+    (void)hWndTo;
+    (void)lpPoints;
+    (void)cPoints;
+    return 0;
+}
+
+BOOL WINAPI Shim_InvalidateRect(HWND hWnd, const RECT* lpRect, BOOL bErase) {
+    (void)hWnd;
+    (void)lpRect;
+    (void)bErase;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_ValidateRect(HWND hWnd, const RECT* lpRect) {
+    (void)hWnd;
+    (void)lpRect;
+    return TRUE;
+}
+
+BOOL WINAPI Shim_UpdateWindow(HWND hWnd) {
+    (void)hWnd;
+    return TRUE;
+}
+
+HDC WINAPI Shim_BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint) {
+    (void)hWnd;
+    if (lpPaint) {
+        memset(lpPaint, 0, sizeof(*lpPaint));
+        lpPaint->hdc = reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+    }
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+}
+
+BOOL WINAPI Shim_EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint) {
+    (void)hWnd;
+    (void)lpPaint;
+    return TRUE;
+}
+
+int WINAPI Shim_FillRect(HDC hDC, const RECT* lprc, HBRUSH hbr) {
+    (void)hDC;
+    (void)lprc;
+    (void)hbr;
+    return 1;
+}
+
+DWORD WINAPI Shim_GetMessagePos() {
+    return 0;
+}
+
+LONG WINAPI Shim_GetMessageTime() {
+    return static_cast<LONG>(GetTickCount());
+}
+
+BOOL WINAPI Shim_GetCursorPos(LPPOINT lpPoint) {
+    if (!lpPoint) return FALSE;
+    lpPoint->x = 0;
+    lpPoint->y = 0;
+    return TRUE;
+}
+
+HWND WINAPI Shim_WindowFromPoint(POINT Point) {
+    (void)Point;
+    return nullptr;
+}
+
+SHORT WINAPI Shim_GetKeyState(int nVirtKey) {
+    (void)nVirtKey;
+    return 0;
+}
+
+SHORT WINAPI Shim_GetAsyncKeyState(int vKey) {
+    (void)vKey;
+    return 0;
+}
+
+BOOL WINAPI Shim_GetKeyboardState(PBYTE lpKeyState) {
+    if (lpKeyState) memset(lpKeyState, 0, 256);
+    return TRUE;
+}
+
+HHOOK WINAPI Shim_SetWindowsHookExA(int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD dwThreadId) {
+    (void)idHook;
+    (void)lpfn;
+    (void)hmod;
+    (void)dwThreadId;
+    return reinterpret_cast<HHOOK>(static_cast<ULONG_PTR>(0x53484801u));
+}
+
+HHOOK WINAPI Shim_SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD dwThreadId) {
+    (void)idHook;
+    (void)lpfn;
+    (void)hmod;
+    (void)dwThreadId;
+    return reinterpret_cast<HHOOK>(static_cast<ULONG_PTR>(0x53484801u));
+}
+
+BOOL WINAPI Shim_UnhookWindowsHookEx(HHOOK hhk) {
+    (void)hhk;
+    return TRUE;
+}
+
+LRESULT WINAPI Shim_CallNextHookEx(HHOOK hhk, int nCode, WPARAM wParam, LPARAM lParam) {
+    (void)hhk;
+    (void)nCode;
+    (void)wParam;
+    (void)lParam;
+    return 0;
+}
+
+// --- Static PE Forwarder Shims for user32.dll (DDE), gdi32.dll, and ole32.dll ---
+
+extern "C" LPBYTE WINAPI Shim_DdeAccessData(HANDLE hData, LPDWORD pcbDataSize) {
+    (void)hData;
+    if (pcbDataSize) *pcbDataSize = 0;
+    return nullptr;
+}
+
+extern "C" HANDLE WINAPI Shim_DdeClientTransaction(
+    LPBYTE pData, DWORD cbData, HANDLE hConv, HANDLE hszItem, UINT wFmt, UINT wType, DWORD dwTimeout, LPDWORD pdwResult) {
+    (void)pData;
+    (void)cbData;
+    (void)hConv;
+    (void)hszItem;
+    (void)wFmt;
+    (void)wType;
+    (void)dwTimeout;
+    if (pdwResult) *pdwResult = 0;
+    return nullptr;
+}
+
+extern "C" int WINAPI Shim_DdeCmpStringHandles(HANDLE hsz1, HANDLE hsz2) {
+    return (hsz1 == hsz2) ? 0 : ((hsz1 < hsz2) ? -1 : 1);
+}
+
+extern "C" HANDLE WINAPI Shim_DdeConnect(DWORD idInst, HANDLE hszService, HANDLE hszTopic, PVOID pCC) {
+    (void)idInst;
+    (void)hszService;
+    (void)hszTopic;
+    (void)pCC;
+    return nullptr;
+}
+
+extern "C" HANDLE WINAPI Shim_DdeCreateDataHandle(
+    DWORD idInst, LPBYTE pSrc, DWORD cb, DWORD cbOff, HANDLE hszItem, UINT wFmt, UINT afCmd) {
+    (void)idInst;
+    (void)pSrc;
+    (void)cb;
+    (void)cbOff;
+    (void)hszItem;
+    (void)wFmt;
+    (void)afCmd;
+    return nullptr;
+}
+
+extern "C" HANDLE WINAPI Shim_DdeCreateStringHandleA(DWORD idInst, LPCSTR psz, int iCodePage) {
+    (void)idInst;
+    (void)psz;
+    (void)iCodePage;
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484450u));
+}
+
+extern "C" BOOL WINAPI Shim_DdeDisconnect(HANDLE hConv) {
+    (void)hConv;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_DdeFreeDataHandle(HANDLE hData) {
+    (void)hData;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_DdeFreeStringHandle(DWORD idInst, HANDLE hsz) {
+    (void)idInst;
+    (void)hsz;
+    return TRUE;
+}
+
+extern "C" DWORD WINAPI Shim_DdeGetData(HANDLE hData, LPBYTE pDst, DWORD cbMax, DWORD cbOff) {
+    (void)hData;
+    (void)pDst;
+    (void)cbMax;
+    (void)cbOff;
+    return 0;
+}
+
+extern "C" UINT WINAPI Shim_DdeGetLastError(DWORD idInst) {
+    (void)idInst;
+    return 0;
+}
+
+extern "C" UINT WINAPI Shim_DdeInitializeA(LPDWORD pidInst, PVOID pfnCallback, DWORD afCmd, DWORD ulRes) {
+    (void)pfnCallback;
+    (void)afCmd;
+    (void)ulRes;
+    if (pidInst && *pidInst == 0) *pidInst = 1;
+    return 0 /* DMLERR_NO_ERROR */;
+}
+
+extern "C" HANDLE WINAPI Shim_DdeNameService(DWORD idInst, HANDLE hsz1, HANDLE hsz2, UINT afCmd) {
+    (void)idInst;
+    (void)hsz1;
+    (void)hsz2;
+    (void)afCmd;
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(1));
+}
+
+extern "C" BOOL WINAPI Shim_DdePostAdvise(DWORD idInst, HANDLE hszTopic, HANDLE hszItem) {
+    (void)idInst;
+    (void)hszTopic;
+    (void)hszItem;
+    return TRUE;
+}
+
+extern "C" UINT WINAPI Shim_DdeQueryConvInfo(HANDLE hConv, DWORD idTransaction, PVOID pConvInfo) {
+    (void)hConv;
+    (void)idTransaction;
+    (void)pConvInfo;
+    return 0;
+}
+
+extern "C" DWORD WINAPI Shim_DdeQueryStringA(DWORD idInst, HANDLE hsz, LPSTR psz, DWORD cchMax, int iCodePage) {
+    (void)idInst;
+    (void)hsz;
+    (void)iCodePage;
+    if (psz && cchMax > 0) *psz = '\0';
+    return 0;
+}
+
+extern "C" BOOL WINAPI Shim_DdeSetUserHandle(HANDLE hConv, DWORD id, DWORD_PTR hUser) {
+    (void)hConv;
+    (void)id;
+    (void)hUser;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_DdeUninitialize(DWORD idInst) {
+    (void)idInst;
+    return TRUE;
+}
+
+extern "C" HMETAFILE WINAPI Shim_CopyMetaFileA(HMETAFILE hmfOld, LPCSTR pszFile) {
+    (void)hmfOld;
+    (void)pszFile;
+    return nullptr;
+}
+
+HDC WINAPI Shim_CreateDCA(LPCSTR pszDriver, LPCSTR pszDevice, LPCSTR pszPort, const DEVMODEA* pdm) {
+    (void)pszDriver;
+    (void)pszDevice;
+    (void)pszPort;
+    (void)pdm;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+}
+
+HDC WINAPI Shim_CreateDCW(LPCWSTR pszDriver, LPCWSTR pszDevice, LPCWSTR pszPort, const DEVMODEW* pdm) {
+    (void)pszDriver;
+    (void)pszDevice;
+    (void)pszPort;
+    (void)pdm;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+}
+
+extern "C" HDC WINAPI Shim_CreateICA(LPCSTR pszDriver, LPCSTR pszDevice, LPCSTR pszPort, const DEVMODEA* pdm) {
+    (void)pszDriver;
+    (void)pszDevice;
+    (void)pszPort;
+    (void)pdm;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+}
+
+HDC WINAPI Shim_CreateICW(LPCWSTR pszDriver, LPCWSTR pszDevice, LPCWSTR pszPort, const DEVMODEW* pdm) {
+    (void)pszDriver;
+    (void)pszDevice;
+    (void)pszPort;
+    (void)pdm;
+    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+}
+
+extern "C" int WINAPI Shim_Escape(HDC hdc, int iEscape, int cjIn, LPCSTR pvIn, LPVOID pvOut) {
+    (void)hdc;
+    (void)iEscape;
+    (void)cjIn;
+    (void)pvIn;
+    (void)pvOut;
+    return 0;
+}
+
+extern "C" BOOL WINAPI Shim_Pie(
+    HDC hdc, int left, int top, int right, int bottom, int xr1, int yr1, int xr2, int yr2) {
+    (void)hdc;
+    (void)left;
+    (void)top;
+    (void)right;
+    (void)bottom;
+    (void)xr1;
+    (void)yr1;
+    (void)xr2;
+    (void)yr2;
+    return TRUE;
+}
+
+extern "C" HDC WINAPI Shim_ResetDCA(HDC hdc, const DEVMODEA* lpInitData) {
+    (void)lpInitData;
+    return hdc;
+}
+
+extern "C" BOOL WINAPI Shim_ScaleViewportExtEx(HDC hdc, int xn, int xd, int yn, int yd, LPSIZE lpsz) {
+    (void)hdc;
+    (void)xn;
+    (void)xd;
+    (void)yn;
+    (void)yd;
+    if (lpsz) {
+        lpsz->cx = 1;
+        lpsz->cy = 1;
+    }
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_ScaleWindowExtEx(HDC hdc, int xn, int xd, int yn, int yd, LPSIZE lpsz) {
+    (void)hdc;
+    (void)xn;
+    (void)xd;
+    (void)yn;
+    (void)yd;
+    if (lpsz) {
+        lpsz->cx = 1;
+        lpsz->cy = 1;
+    }
+    return TRUE;
+}
+
+extern "C" int WINAPI Shim_SetAbortProc(HDC hdc, ABORTPROC proc) {
+    (void)hdc;
+    (void)proc;
+    return 1;
+}
+
+extern "C" BOOL WINAPI Shim_SetPixelV(HDC hdc, int x, int y, COLORREF color) {
+    (void)hdc;
+    (void)x;
+    (void)y;
+    (void)color;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_WidenPath(HDC hdc) {
+    (void)hdc;
+    return TRUE;
+}
+
+extern "C" HBITMAP WINAPI Shim_CreateBitmapIndirect(const BITMAP* pbm) {
+    (void)pbm;
+    return reinterpret_cast<HBITMAP>(static_cast<ULONG_PTR>(0x53484D12u));
+}
+
+extern "C" HBITMAP WINAPI Shim_CreateDiscardableBitmap(HDC hdc, int cx, int cy) {
+    (void)hdc;
+    (void)cx;
+    (void)cy;
+    return reinterpret_cast<HBITMAP>(static_cast<ULONG_PTR>(0x53484D13u));
+}
+
+extern "C" HRGN WINAPI Shim_CreateEllipticRgnIndirect(const RECT* lprect) {
+    (void)lprect;
+    return reinterpret_cast<HRGN>(static_cast<ULONG_PTR>(0x53485201u));
+}
+
+extern "C" HPALETTE WINAPI Shim_CreateHalftonePalette(HDC hdc) {
+    (void)hdc;
+    return reinterpret_cast<HPALETTE>(static_cast<ULONG_PTR>(0x53485001u));
+}
+
+extern "C" HRGN WINAPI Shim_CreatePolygonRgn(const POINT* pptl, int cPoint, int iMode) {
+    (void)pptl;
+    (void)cPoint;
+    (void)iMode;
+    return reinterpret_cast<HRGN>(static_cast<ULONG_PTR>(0x53485202u));
+}
+
+extern "C" int WINAPI Shim_EnumFontsA(HDC hdc, LPCSTR lpLogfont, FONTENUMPROCA lpProc, LPARAM lParam) {
+    (void)hdc;
+    (void)lpLogfont;
+    (void)lpProc;
+    (void)lParam;
+    return 1;
+}
+
+extern "C" BOOL WINAPI Shim_GetBrushOrgEx(HDC hdc, LPPOINT lppt) {
+    (void)hdc;
+    if (!lppt) return FALSE;
+    lppt->x = 0;
+    lppt->y = 0;
+    return TRUE;
+}
+
+extern "C" COLORREF WINAPI Shim_GetNearestColor(HDC hdc, COLORREF color) {
+    (void)hdc;
+    return color;
+}
+
+extern "C" BOOL WINAPI Shim_GetTextExtentPointA(HDC hdc, LPCSTR lpString, int c, LPSIZE lpsz) {
+    return Shim_GetTextExtentPoint32A(hdc, lpString, c, lpsz);
+}
+
+extern "C" BOOL WINAPI Shim_PtInRegion(HRGN hrgn, int x, int y) {
+    (void)hrgn;
+    (void)x;
+    (void)y;
+    return FALSE;
+}
+
+extern "C" BOOL WINAPI Shim_RoundRect(HDC hdc, int left, int top, int right, int bottom, int width, int height) {
+    (void)hdc;
+    (void)left;
+    (void)top;
+    (void)right;
+    (void)bottom;
+    (void)width;
+    (void)height;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_SetBrushOrgEx(HDC hdc, int x, int y, LPPOINT lppt) {
+    (void)hdc;
+    (void)x;
+    (void)y;
+    if (lppt) {
+        lppt->x = 0;
+        lppt->y = 0;
+    }
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_SetWindowOrgEx(HDC hdc, int x, int y, LPPOINT lppt) {
+    (void)hdc;
+    (void)x;
+    (void)y;
+    if (lppt) {
+        lppt->x = 0;
+        lppt->y = 0;
+    }
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_UnrealizeObject(HGDIOBJ h) {
+    (void)h;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_CoIsOle1Class(REFCLSID rclsid) {
+    (void)rclsid;
+    return FALSE;
+}
+
+extern "C" HRESULT WINAPI Shim_OleConvertIStorageToOLESTREAM(LPSTORAGE pstg, PVOID lpolestream) {
+    (void)pstg;
+    (void)lpolestream;
+    return E_NOTIMPL;
+}
+
+extern "C" HRESULT WINAPI Shim_OleConvertOLESTREAMToIStorage(PVOID lpolestream, LPSTORAGE pstg, const void* ptd) {
+    (void)lpolestream;
+    (void)pstg;
+    (void)ptd;
+    return E_NOTIMPL;
+}
+
+extern "C" HRESULT WINAPI Shim_OleCreateLink(
+    LPMONIKER pmkLinkSrc, REFIID riid, DWORD renderopt, LPFORMATETC lpFormatEtc,
+    LPOLECLIENTSITE pClientSite, LPSTORAGE pStg, LPVOID* ppvObj) {
+    (void)pmkLinkSrc;
+    (void)riid;
+    (void)renderopt;
+    (void)lpFormatEtc;
+    (void)pClientSite;
+    (void)pStg;
+    if (ppvObj) *ppvObj = nullptr;
+    return E_NOTIMPL;
+}
+
+extern "C" HRESULT WINAPI Shim_OleDoAutoConvert(LPSTORAGE pStg, LPCLSID pClsidNew) {
+    (void)pStg;
+    if (pClsidNew) memset(pClsidNew, 0, sizeof(*pClsidNew));
+    return S_OK;
+}
+
+// --- Registration-Free TypeLib Redirection for Embedded TypeLibs ---
+
+using CLSIDFromStringFn = HRESULT(WINAPI*)(LPCOLESTR lpsz, LPCLSID pclsid);
+using LoadTypeLibExFn = HRESULT(WINAPI*)(LPCOLESTR szFile, REGKIND regkind, ITypeLib** pptlib);
+
+extern "C" HRESULT WINAPI Shim_SxsOleAut32MapConfiguredClsidToReferenceClsid(
+    REFCLSID rclsid,
+    CLSID* pclsid) {
+    (void)rclsid;
+    if (!pclsid) return E_INVALIDARG;
+    return S_FALSE;
+}
+
+extern "C" HRESULT WINAPI Shim_SxsOleAut32MapReferenceClsidToConfiguredClsid(
+    REFCLSID rclsid,
+    CLSID* pclsid) {
+    (void)rclsid;
+    if (!pclsid) return E_INVALIDARG;
+    return S_FALSE;
+}
+
+extern "C" HRESULT WINAPI Shim_SxsOleAut32MapIIDToProxyStubCLSID(
+    REFIID riid,
+    CLSID* pclsid) {
+    (void)riid;
+    if (!pclsid) return E_INVALIDARG;
+    memset(pclsid, 0, sizeof(*pclsid));
+    return S_FALSE;
+}
+
+extern "C" HRESULT WINAPI Shim_SxsOleAut32MapIIDOrCLSIDToTypeLibrary(
+    REFGUID rguid,
+    GUID* ptlbguid) {
+    (void)rguid;
+    if (!ptlbguid) return E_INVALIDARG;
+    memset(ptlbguid, 0, sizeof(*ptlbguid));
+    return S_FALSE;
+}
+
+extern "C" HRESULT WINAPI Shim_SxsOleAut32MapIIDToTLBPath(
+    REFIID riid,
+    ULONG cchBuffer,
+    LPWSTR pwszBuffer,
+    ULONG* pcchWrittenOrRequired) {
+    (void)riid;
+    (void)cchBuffer;
+    (void)pwszBuffer;
+    if (pcchWrittenOrRequired) *pcchWrittenOrRequired = 0;
+    return S_FALSE;
+}
+
+extern "C" HRESULT WINAPI Shim_SxsOleAut32RedirectTypeLibrary(
+    LPCWSTR pwszGuid,
+    ULONG wVerMajor,
+    ULONG wVerMinor,
+    LCID lcid,
+    ULONG fFlags,
+    ULONG* pcchFileName,
+    LPWSTR pwszFileName) {
+    (void)wVerMajor;
+    (void)wVerMinor;
+    (void)lcid;
+    (void)fFlags;
+    if (!pwszGuid || !pcchFileName || !pwszFileName) return E_INVALIDARG;
+
+    HMODULE hCombase = GetModuleHandleW(L"combase.dll");
+    if (!hCombase) hCombase = GetModuleHandleW(L"ole32.dll");
+    HMODULE hOleAut32 = GetModuleHandleW(L"oleaut32.dll");
+    if (!hCombase || !hOleAut32) return S_FALSE;
+
+    auto pCLSIDFromString = reinterpret_cast<CLSIDFromStringFn>(GetProcAddress(hCombase, "CLSIDFromString"));
+    if (!pCLSIDFromString) {
+        HMODULE hOle32 = GetModuleHandleW(L"ole32.dll");
+        if (hOle32) pCLSIDFromString = reinterpret_cast<CLSIDFromStringFn>(GetProcAddress(hOle32, "CLSIDFromString"));
+    }
+    auto pLoadTypeLibEx = reinterpret_cast<LoadTypeLibExFn>(GetProcAddress(hOleAut32, "LoadTypeLibEx"));
+    if (!pCLSIDFromString || !pLoadTypeLibEx) return S_FALSE;
+
+    GUID targetGuid{};
+    if (FAILED(pCLSIDFromString(pwszGuid, &targetGuid))) return S_FALSE;
+
+    SYSTEM_INFO sysInfo{};
+    GetSystemInfo(&sysInfo);
+    const BYTE* cursor = static_cast<const BYTE*>(sysInfo.lpMinimumApplicationAddress);
+    const BYTE* maxAddr = static_cast<const BYTE*>(sysInfo.lpMaximumApplicationAddress);
+
+    while (cursor < maxAddr) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(cursor, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.RegionSize == 0) break;
+        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_IMAGE && mbi.BaseAddress == mbi.AllocationBase) {
+            HMODULE hMod = static_cast<HMODULE>(mbi.AllocationBase);
+            wchar_t modPath[MAX_PATH]{};
+            DWORD len = 0;
+            for (WORD resId = 1; resId <= 8; ++resId) {
+                if (!FindResourceW(hMod, MAKEINTRESOURCEW(resId), L"TYPELIB")) continue;
+                if (len == 0) {
+                    len = GetModuleFileNameW(hMod, modPath, MAX_PATH);
+                    if (len == 0 || len >= MAX_PATH - 4) break;
+                }
+                wchar_t candidatePath[MAX_PATH]{};
+                DWORD candidateLen = len;
+                memcpy(candidatePath, modPath, len * sizeof(wchar_t));
+                if (resId > 1) {
+                    candidatePath[candidateLen++] = L'\\';
+                    candidatePath[candidateLen++] = static_cast<wchar_t>(L'0' + resId);
+                }
+                candidatePath[candidateLen] = L'\0';
+
+                ITypeLib* pTypeLib = nullptr;
+                if (SUCCEEDED(pLoadTypeLibEx(candidatePath, REGKIND_NONE, &pTypeLib)) && pTypeLib) {
+                    TLIBATTR* pAttr = nullptr;
+                    bool matched = false;
+                    if (SUCCEEDED(pTypeLib->GetLibAttr(&pAttr)) && pAttr) {
+                        matched = IsEqualGUID(pAttr->guid, targetGuid) != FALSE;
+                        pTypeLib->ReleaseTLibAttr(pAttr);
+                    }
+                    pTypeLib->Release();
+                    if (matched) {
+                        ULONG needed = candidateLen + 1;
+                        if (*pcchFileName < needed) {
+                            *pcchFileName = needed;
+                            return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+                        }
+                        memcpy(pwszFileName, candidatePath, needed * sizeof(wchar_t));
+                        *pcchFileName = needed;
+                        return S_OK;
+                    }
+                }
+            }
+        }
+        const BYTE* next = static_cast<const BYTE*>(mbi.BaseAddress) + mbi.RegionSize;
+        if (next <= cursor) break;
+        cursor = next;
+    }
+    return S_FALSE;
+}
+
 struct ExportMapping {
     const char* Name;
     PVOID Target;
@@ -1577,16 +3058,34 @@ const ExportMapping kExportTable[] = {
     {"UnregisterClassW", reinterpret_cast<PVOID>(Shim_UnregisterClassW)},
     {"GetClassInfoW", reinterpret_cast<PVOID>(Shim_GetClassInfoW)},
     {"GetClassInfoExW", reinterpret_cast<PVOID>(Shim_GetClassInfoExW)},
+    {"RegisterClassA", reinterpret_cast<PVOID>(Shim_RegisterClassA)},
+    {"RegisterClassExA", reinterpret_cast<PVOID>(Shim_RegisterClassExA)},
+    {"UnregisterClassA", reinterpret_cast<PVOID>(Shim_UnregisterClassA)},
+    {"GetClassInfoA", reinterpret_cast<PVOID>(Shim_GetClassInfoA)},
+    {"GetClassInfoExA", reinterpret_cast<PVOID>(Shim_GetClassInfoExA)},
+    {"GetClassNameW", reinterpret_cast<PVOID>(Shim_GetClassNameW)},
+    {"GetClassNameA", reinterpret_cast<PVOID>(Shim_GetClassNameA)},
+    {"GetClassLongW", reinterpret_cast<PVOID>(Shim_GetClassLongW)},
+    {"GetClassLongA", reinterpret_cast<PVOID>(Shim_GetClassLongA)},
+    {"SetClassLongW", reinterpret_cast<PVOID>(Shim_SetClassLongW)},
+    {"SetClassLongA", reinterpret_cast<PVOID>(Shim_SetClassLongA)},
     {"CallWindowProcW", reinterpret_cast<PVOID>(Shim_CallWindowProcW)},
+    {"CallWindowProcA", reinterpret_cast<PVOID>(Shim_CallWindowProcA)},
     {"CreateWindowExW", reinterpret_cast<PVOID>(Shim_CreateWindowExW)},
+    {"CreateWindowExA", reinterpret_cast<PVOID>(Shim_CreateWindowExA)},
     {"DestroyWindow", reinterpret_cast<PVOID>(Shim_DestroyWindow)},
     {"DefWindowProcW", reinterpret_cast<PVOID>(Shim_DefWindowProcW)},
+    {"DefWindowProcA", reinterpret_cast<PVOID>(Shim_DefWindowProcA)},
     {"IsWindow", reinterpret_cast<PVOID>(Shim_IsWindow)},
     {"IsChild", reinterpret_cast<PVOID>(Shim_IsChild)},
     {"SetWindowLongPtrW", reinterpret_cast<PVOID>(Shim_SetWindowLongPtrW)},
     {"SetWindowLongW", reinterpret_cast<PVOID>(Shim_SetWindowLongW)},
     {"GetWindowLongPtrW", reinterpret_cast<PVOID>(Shim_GetWindowLongPtrW)},
     {"GetWindowLongW", reinterpret_cast<PVOID>(Shim_GetWindowLongW)},
+    {"SetWindowLongPtrA", reinterpret_cast<PVOID>(Shim_SetWindowLongPtrA)},
+    {"SetWindowLongA", reinterpret_cast<PVOID>(Shim_SetWindowLongA)},
+    {"GetWindowLongPtrA", reinterpret_cast<PVOID>(Shim_GetWindowLongPtrA)},
+    {"GetWindowLongA", reinterpret_cast<PVOID>(Shim_GetWindowLongA)},
     {"GetWindowThreadProcessId", reinterpret_cast<PVOID>(Shim_GetWindowThreadProcessId)},
     {"PeekMessageW", reinterpret_cast<PVOID>(Shim_PeekMessageW)},
     {"GetMessageW", reinterpret_cast<PVOID>(Shim_GetMessageW)},
@@ -1596,6 +3095,12 @@ const ExportMapping kExportTable[] = {
     {"PostThreadMessageW", reinterpret_cast<PVOID>(Shim_PostThreadMessageW)},
     {"PostQuitMessage", reinterpret_cast<PVOID>(Shim_PostQuitMessage)},
     {"SendMessageW", reinterpret_cast<PVOID>(Shim_SendMessageW)},
+    {"PeekMessageA", reinterpret_cast<PVOID>(Shim_PeekMessageA)},
+    {"GetMessageA", reinterpret_cast<PVOID>(Shim_GetMessageA)},
+    {"DispatchMessageA", reinterpret_cast<PVOID>(Shim_DispatchMessageA)},
+    {"PostMessageA", reinterpret_cast<PVOID>(Shim_PostMessageA)},
+    {"PostThreadMessageA", reinterpret_cast<PVOID>(Shim_PostThreadMessageA)},
+    {"SendMessageA", reinterpret_cast<PVOID>(Shim_SendMessageA)},
     {"GetQueueStatus", reinterpret_cast<PVOID>(Shim_GetQueueStatus)},
     {"InSendMessageEx", reinterpret_cast<PVOID>(Shim_InSendMessageEx)},
     {"IsGUIThread", reinterpret_cast<PVOID>(Shim_IsGUIThread)},
@@ -1610,8 +3115,10 @@ const ExportMapping kExportTable[] = {
     {"GetThreadDesktop", reinterpret_cast<PVOID>(Shim_GetThreadDesktop)},
     {"GetUserObjectInformationW", reinterpret_cast<PVOID>(Shim_GetUserObjectInformationW)},
     {"GetClipboardFormatNameW", reinterpret_cast<PVOID>(Shim_GetClipboardFormatNameW)},
+    {"GetClipboardFormatNameA", reinterpret_cast<PVOID>(Shim_GetClipboardFormatNameA)},
     {"MessageBeep", reinterpret_cast<PVOID>(Shim_MessageBeep)},
     {"RegisterClipboardFormatW", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatW)},
+    {"RegisterClipboardFormatA", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatA)},
     {"CoInitialize", reinterpret_cast<PVOID>(Shim_CoInitialize)},
     {"CopyEnhMetaFileA", reinterpret_cast<PVOID>(Shim_CopyEnhMetaFileA)},
     {"CreatePenIndirect", reinterpret_cast<PVOID>(Shim_CreatePenIndirect)},
@@ -1621,6 +3128,150 @@ const ExportMapping kExportTable[] = {
     {"GetKeyNameTextA", reinterpret_cast<PVOID>(Shim_GetKeyNameTextA)},
     {"ImageList_GetIconSize", reinterpret_cast<PVOID>(Shim_ImageList_GetIconSize)},
     {"ImageList_SetIconSize", reinterpret_cast<PVOID>(Shim_ImageList_SetIconSize)},
+    {"GetStockObject", reinterpret_cast<PVOID>(Shim_GetStockObject)},
+    {"GetDC", reinterpret_cast<PVOID>(Shim_GetDC)},
+    {"GetDCEx", reinterpret_cast<PVOID>(Shim_GetDCEx)},
+    {"GetWindowDC", reinterpret_cast<PVOID>(Shim_GetWindowDC)},
+    {"ReleaseDC", reinterpret_cast<PVOID>(Shim_ReleaseDC)},
+    {"CreateCompatibleDC", reinterpret_cast<PVOID>(Shim_CreateCompatibleDC)},
+    {"CreateDCA", reinterpret_cast<PVOID>(Shim_CreateDCA)},
+    {"CreateDCW", reinterpret_cast<PVOID>(Shim_CreateDCW)},
+    {"CreateICW", reinterpret_cast<PVOID>(Shim_CreateICW)},
+    {"DeleteDC", reinterpret_cast<PVOID>(Shim_DeleteDC)},
+    {"SaveDC", reinterpret_cast<PVOID>(Shim_SaveDC)},
+    {"RestoreDC", reinterpret_cast<PVOID>(Shim_RestoreDC)},
+    {"GetDeviceCaps", reinterpret_cast<PVOID>(Shim_GetDeviceCaps)},
+    {"GetSystemMetrics", reinterpret_cast<PVOID>(Shim_GetSystemMetrics)},
+    {"GetObjectW", reinterpret_cast<PVOID>(Shim_GetObjectW)},
+    {"GetObjectA", reinterpret_cast<PVOID>(Shim_GetObjectA)},
+    {"GetObjectType", reinterpret_cast<PVOID>(Shim_GetObjectType)},
+    {"GetCurrentObject", reinterpret_cast<PVOID>(Shim_GetCurrentObject)},
+    {"SelectObject", reinterpret_cast<PVOID>(Shim_SelectObject)},
+    {"DeleteObject", reinterpret_cast<PVOID>(Shim_DeleteObject)},
+    {"CreateSolidBrush", reinterpret_cast<PVOID>(Shim_CreateSolidBrush)},
+    {"CreateBrushIndirect", reinterpret_cast<PVOID>(Shim_CreateBrushIndirect)},
+    {"CreateFontIndirectW", reinterpret_cast<PVOID>(Shim_CreateFontIndirectW)},
+    {"CreateFontIndirectA", reinterpret_cast<PVOID>(Shim_CreateFontIndirectA)},
+    {"CreateCompatibleBitmap", reinterpret_cast<PVOID>(Shim_CreateCompatibleBitmap)},
+    {"CreateBitmap", reinterpret_cast<PVOID>(Shim_CreateBitmap)},
+    {"GetTextMetricsW", reinterpret_cast<PVOID>(Shim_GetTextMetricsW)},
+    {"GetTextMetricsA", reinterpret_cast<PVOID>(Shim_GetTextMetricsA)},
+    {"GetTextExtentPoint32W", reinterpret_cast<PVOID>(Shim_GetTextExtentPoint32W)},
+    {"SetMapMode", reinterpret_cast<PVOID>(Shim_SetMapMode)},
+    {"GetMapMode", reinterpret_cast<PVOID>(Shim_GetMapMode)},
+    {"SetBkMode", reinterpret_cast<PVOID>(Shim_SetBkMode)},
+    {"GetBkMode", reinterpret_cast<PVOID>(Shim_GetBkMode)},
+    {"SetBkColor", reinterpret_cast<PVOID>(Shim_SetBkColor)},
+    {"GetBkColor", reinterpret_cast<PVOID>(Shim_GetBkColor)},
+    {"SetTextColor", reinterpret_cast<PVOID>(Shim_SetTextColor)},
+    {"GetTextColor", reinterpret_cast<PVOID>(Shim_GetTextColor)},
+    {"GetSysColor", reinterpret_cast<PVOID>(Shim_GetSysColor)},
+    {"GetSysColorBrush", reinterpret_cast<PVOID>(Shim_GetSysColorBrush)},
+    {"LoadIconA", reinterpret_cast<PVOID>(Shim_LoadIconA)},
+    {"LoadIconW", reinterpret_cast<PVOID>(Shim_LoadIconW)},
+    {"LoadCursorA", reinterpret_cast<PVOID>(Shim_LoadCursorA)},
+    {"LoadCursorW", reinterpret_cast<PVOID>(Shim_LoadCursorW)},
+    {"LoadImageA", reinterpret_cast<PVOID>(Shim_LoadImageA)},
+    {"LoadImageW", reinterpret_cast<PVOID>(Shim_LoadImageW)},
+    {"SystemParametersInfoA", reinterpret_cast<PVOID>(Shim_SystemParametersInfoA)},
+    {"SystemParametersInfoW", reinterpret_cast<PVOID>(Shim_SystemParametersInfoW)},
+    {"SetWindowPos", reinterpret_cast<PVOID>(Shim_SetWindowPos)},
+    {"ShowWindow", reinterpret_cast<PVOID>(Shim_ShowWindow)},
+    {"MoveWindow", reinterpret_cast<PVOID>(Shim_MoveWindow)},
+    {"EnableWindow", reinterpret_cast<PVOID>(Shim_EnableWindow)},
+    {"IsWindowVisible", reinterpret_cast<PVOID>(Shim_IsWindowVisible)},
+    {"IsWindowEnabled", reinterpret_cast<PVOID>(Shim_IsWindowEnabled)},
+    {"IsIconic", reinterpret_cast<PVOID>(Shim_IsIconic)},
+    {"IsZoomed", reinterpret_cast<PVOID>(Shim_IsZoomed)},
+    {"GetClientRect", reinterpret_cast<PVOID>(Shim_GetClientRect)},
+    {"GetWindowRect", reinterpret_cast<PVOID>(Shim_GetWindowRect)},
+    {"GetDesktopWindow", reinterpret_cast<PVOID>(Shim_GetDesktopWindow)},
+    {"GetParent", reinterpret_cast<PVOID>(Shim_GetParent)},
+    {"SetParent", reinterpret_cast<PVOID>(Shim_SetParent)},
+    {"GetWindow", reinterpret_cast<PVOID>(Shim_GetWindow)},
+    {"GetTopWindow", reinterpret_cast<PVOID>(Shim_GetTopWindow)},
+    {"GetFocus", reinterpret_cast<PVOID>(Shim_GetFocus)},
+    {"SetFocus", reinterpret_cast<PVOID>(Shim_SetFocus)},
+    {"GetActiveWindow", reinterpret_cast<PVOID>(Shim_GetActiveWindow)},
+    {"SetActiveWindow", reinterpret_cast<PVOID>(Shim_SetActiveWindow)},
+    {"GetForegroundWindow", reinterpret_cast<PVOID>(Shim_GetForegroundWindow)},
+    {"SetForegroundWindow", reinterpret_cast<PVOID>(Shim_SetForegroundWindow)},
+    {"GetCapture", reinterpret_cast<PVOID>(Shim_GetCapture)},
+    {"SetCapture", reinterpret_cast<PVOID>(Shim_SetCapture)},
+    {"ReleaseCapture", reinterpret_cast<PVOID>(Shim_ReleaseCapture)},
+    {"ClientToScreen", reinterpret_cast<PVOID>(Shim_ClientToScreen)},
+    {"ScreenToClient", reinterpret_cast<PVOID>(Shim_ScreenToClient)},
+    {"MapWindowPoints", reinterpret_cast<PVOID>(Shim_MapWindowPoints)},
+    {"InvalidateRect", reinterpret_cast<PVOID>(Shim_InvalidateRect)},
+    {"ValidateRect", reinterpret_cast<PVOID>(Shim_ValidateRect)},
+    {"UpdateWindow", reinterpret_cast<PVOID>(Shim_UpdateWindow)},
+    {"BeginPaint", reinterpret_cast<PVOID>(Shim_BeginPaint)},
+    {"EndPaint", reinterpret_cast<PVOID>(Shim_EndPaint)},
+    {"FillRect", reinterpret_cast<PVOID>(Shim_FillRect)},
+    {"GetMessagePos", reinterpret_cast<PVOID>(Shim_GetMessagePos)},
+    {"GetMessageTime", reinterpret_cast<PVOID>(Shim_GetMessageTime)},
+    {"GetCursorPos", reinterpret_cast<PVOID>(Shim_GetCursorPos)},
+    {"WindowFromPoint", reinterpret_cast<PVOID>(Shim_WindowFromPoint)},
+    {"GetKeyState", reinterpret_cast<PVOID>(Shim_GetKeyState)},
+    {"GetAsyncKeyState", reinterpret_cast<PVOID>(Shim_GetAsyncKeyState)},
+    {"GetKeyboardState", reinterpret_cast<PVOID>(Shim_GetKeyboardState)},
+    {"SetWindowsHookExA", reinterpret_cast<PVOID>(Shim_SetWindowsHookExA)},
+    {"SetWindowsHookExW", reinterpret_cast<PVOID>(Shim_SetWindowsHookExW)},
+    {"UnhookWindowsHookEx", reinterpret_cast<PVOID>(Shim_UnhookWindowsHookEx)},
+    {"CallNextHookEx", reinterpret_cast<PVOID>(Shim_CallNextHookEx)},
+    {"DdeAccessData", reinterpret_cast<PVOID>(Shim_DdeAccessData)},
+    {"DdeClientTransaction", reinterpret_cast<PVOID>(Shim_DdeClientTransaction)},
+    {"DdeCmpStringHandles", reinterpret_cast<PVOID>(Shim_DdeCmpStringHandles)},
+    {"DdeConnect", reinterpret_cast<PVOID>(Shim_DdeConnect)},
+    {"DdeCreateDataHandle", reinterpret_cast<PVOID>(Shim_DdeCreateDataHandle)},
+    {"DdeCreateStringHandleA", reinterpret_cast<PVOID>(Shim_DdeCreateStringHandleA)},
+    {"DdeDisconnect", reinterpret_cast<PVOID>(Shim_DdeDisconnect)},
+    {"DdeFreeDataHandle", reinterpret_cast<PVOID>(Shim_DdeFreeDataHandle)},
+    {"DdeFreeStringHandle", reinterpret_cast<PVOID>(Shim_DdeFreeStringHandle)},
+    {"DdeGetData", reinterpret_cast<PVOID>(Shim_DdeGetData)},
+    {"DdeGetLastError", reinterpret_cast<PVOID>(Shim_DdeGetLastError)},
+    {"DdeInitializeA", reinterpret_cast<PVOID>(Shim_DdeInitializeA)},
+    {"DdeNameService", reinterpret_cast<PVOID>(Shim_DdeNameService)},
+    {"DdePostAdvise", reinterpret_cast<PVOID>(Shim_DdePostAdvise)},
+    {"DdeQueryConvInfo", reinterpret_cast<PVOID>(Shim_DdeQueryConvInfo)},
+    {"DdeQueryStringA", reinterpret_cast<PVOID>(Shim_DdeQueryStringA)},
+    {"DdeSetUserHandle", reinterpret_cast<PVOID>(Shim_DdeSetUserHandle)},
+    {"DdeUninitialize", reinterpret_cast<PVOID>(Shim_DdeUninitialize)},
+    {"CopyMetaFileA", reinterpret_cast<PVOID>(Shim_CopyMetaFileA)},
+    {"CreateBitmapIndirect", reinterpret_cast<PVOID>(Shim_CreateBitmapIndirect)},
+    {"CreateDiscardableBitmap", reinterpret_cast<PVOID>(Shim_CreateDiscardableBitmap)},
+    {"CreateEllipticRgnIndirect", reinterpret_cast<PVOID>(Shim_CreateEllipticRgnIndirect)},
+    {"CreateHalftonePalette", reinterpret_cast<PVOID>(Shim_CreateHalftonePalette)},
+    {"CreateICA", reinterpret_cast<PVOID>(Shim_CreateICA)},
+    {"CreatePolygonRgn", reinterpret_cast<PVOID>(Shim_CreatePolygonRgn)},
+    {"EnumFontsA", reinterpret_cast<PVOID>(Shim_EnumFontsA)},
+    {"Escape", reinterpret_cast<PVOID>(Shim_Escape)},
+    {"GetBrushOrgEx", reinterpret_cast<PVOID>(Shim_GetBrushOrgEx)},
+    {"GetNearestColor", reinterpret_cast<PVOID>(Shim_GetNearestColor)},
+    {"GetTextExtentPointA", reinterpret_cast<PVOID>(Shim_GetTextExtentPointA)},
+    {"Pie", reinterpret_cast<PVOID>(Shim_Pie)},
+    {"PtInRegion", reinterpret_cast<PVOID>(Shim_PtInRegion)},
+    {"ResetDCA", reinterpret_cast<PVOID>(Shim_ResetDCA)},
+    {"RoundRect", reinterpret_cast<PVOID>(Shim_RoundRect)},
+    {"ScaleViewportExtEx", reinterpret_cast<PVOID>(Shim_ScaleViewportExtEx)},
+    {"ScaleWindowExtEx", reinterpret_cast<PVOID>(Shim_ScaleWindowExtEx)},
+    {"SetAbortProc", reinterpret_cast<PVOID>(Shim_SetAbortProc)},
+    {"SetBrushOrgEx", reinterpret_cast<PVOID>(Shim_SetBrushOrgEx)},
+    {"SetPixelV", reinterpret_cast<PVOID>(Shim_SetPixelV)},
+    {"SetWindowOrgEx", reinterpret_cast<PVOID>(Shim_SetWindowOrgEx)},
+    {"UnrealizeObject", reinterpret_cast<PVOID>(Shim_UnrealizeObject)},
+    {"WidenPath", reinterpret_cast<PVOID>(Shim_WidenPath)},
+    {"CoIsOle1Class", reinterpret_cast<PVOID>(Shim_CoIsOle1Class)},
+    {"OleConvertIStorageToOLESTREAM", reinterpret_cast<PVOID>(Shim_OleConvertIStorageToOLESTREAM)},
+    {"OleConvertOLESTREAMToIStorage", reinterpret_cast<PVOID>(Shim_OleConvertOLESTREAMToIStorage)},
+    {"OleCreateLink", reinterpret_cast<PVOID>(Shim_OleCreateLink)},
+    {"OleDoAutoConvert", reinterpret_cast<PVOID>(Shim_OleDoAutoConvert)},
+    {"SxsOleAut32MapConfiguredClsidToReferenceClsid", reinterpret_cast<PVOID>(Shim_SxsOleAut32MapConfiguredClsidToReferenceClsid)},
+    {"SxsOleAut32MapReferenceClsidToConfiguredClsid", reinterpret_cast<PVOID>(Shim_SxsOleAut32MapReferenceClsidToConfiguredClsid)},
+    {"SxsOleAut32MapIIDToProxyStubCLSID", reinterpret_cast<PVOID>(Shim_SxsOleAut32MapIIDToProxyStubCLSID)},
+    {"SxsOleAut32MapIIDOrCLSIDToTypeLibrary", reinterpret_cast<PVOID>(Shim_SxsOleAut32MapIIDOrCLSIDToTypeLibrary)},
+    {"SxsOleAut32MapIIDToTLBPath", reinterpret_cast<PVOID>(Shim_SxsOleAut32MapIIDToTLBPath)},
+    {"SxsOleAut32RedirectTypeLibrary", reinterpret_cast<PVOID>(Shim_SxsOleAut32RedirectTypeLibrary)},
 };
 
 PVOID ResolveShimFunction(const char* name) {
@@ -1988,6 +3639,8 @@ void RefreshHooksLocked() {
     TryDiscoverModuleLocked(GetModuleHandleW(L"combase.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"user32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"ole32.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"gdi32.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"oleaut32.dll"));
 
     bool enable = !IsOsShimDisabledByEnv();
     g_IsActive = enable;
@@ -2043,7 +3696,9 @@ VOID CALLBACK OnDllNotification(
     size_t cch = name->Length / sizeof(wchar_t);
     if ((cch == 11 && _wcsnicmp(name->Buffer, L"combase.dll", 11) == 0) ||
         (cch == 10 && _wcsnicmp(name->Buffer, L"user32.dll", 10) == 0) ||
-        (cch == 9 && _wcsnicmp(name->Buffer, L"ole32.dll", 9) == 0)) {
+        (cch == 9 && _wcsnicmp(name->Buffer, L"ole32.dll", 9) == 0) ||
+        (cch == 9 && _wcsnicmp(name->Buffer, L"gdi32.dll", 9) == 0) ||
+        (cch == 12 && _wcsnicmp(name->Buffer, L"oleaut32.dll", 12) == 0)) {
         EnsureLocksInitialized();
         EnterCriticalSection(&g_HookLock);
         RefreshHooksLocked();
@@ -2085,6 +3740,8 @@ extern "C" void WINAPI NanoServerStaShim_RestoreOriginal() {
     TryDiscoverModuleLocked(GetModuleHandleW(L"combase.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"user32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"ole32.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"gdi32.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"oleaut32.dll"));
     g_IsActive = false;
     for (auto& mod : g_HookedModules) {
         ApplyModuleState(mod, false);
