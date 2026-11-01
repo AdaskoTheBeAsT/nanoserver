@@ -56,8 +56,9 @@ Out of the box, `mcr.microsoft.com/windows/nanoserver:ltsc2025` **cannot** run a
 | ❌ **No IIS 10 included** | Installs `Microsoft.NanoServer.IIS` using online `DISM /Add-Capability`, configures IIS, and monitors WAS and W3SVC in the foreground. |
 | ❌ **No `msiexec` or `netsh` to install ASP.NET Core Hosting Bundle (ANCM V2)** | ✅ Extracts `aspnetcoremodule_x64_en_v2.msi` in a builder stage and uses a standalone C# tool (`dotnet RegisterAncm.dll`) to register `aspnetcorev2.dll` and inject the `system.webServer/aspNetCore` schema into `applicationHost.config`. |
 | ❌ **No Full .NET Framework 4.8.1 (`net481`) or `System.Web`** | ✅ Transplants `C:\Windows\Microsoft.NET` (`Framework` + `Framework64`), native CLR CRT forwarders (`mscoree.dll`, `ucrtbase_clr0400.dll`, `vcruntime140_clr0400.dll`, `vcruntime140_1_clr0400.dll`), 32-bit/64-bit `inetsrv`, and NDP/ASP.NET registry hives from Server Core into Nano Server. |
-| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` / `gdi32.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
+| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` / `gdi32.dll` / `comctl32.dll` / `shell32.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
 | ❌ **No 32-bit Visual Basic 6 (`msvbvm60.dll`) runtime, legacy DDE/GDI/OLE1 PE exports, ANSI windowing, or registration-free `IDispatch` TypeLib marshaling** | ✅ Pre-installs `msvbvm60.dll` in `SysWOW64` across all 5 WoW64-enabled images, adds 35 missing `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` forwarder exports, provides ANSI window/class/message/clipboard and headless 96-DPI GDI device-context shims, and hooks `oleaut32.dll` (`SxsOleAut32RedirectTypeLibrary`) to resolve embedded `TYPELIB` resources in-memory without `HKCR\TypeLib` registry keys or `sxs.dll`. |
+| ❌ **No 32-bit Visual C++ 10.0 / MFC 10.0 (`mfc100u.dll`, `mfc100.dll`, `atl100.dll`, `msvcr100.dll`, `msvcp100.dll`), `gdiplus.dll`, or `msimg32.dll` runtimes, missing GDI path/transform/metafile exports, or broken `shell32.dll` forwarders (`windows.storage.dll.*`)** | ✅ Pre-installs the 32-bit VC++ 10.0 / MFC 10.0 runtime suite, `msimg32.dll`, and `gdiplus.dll` into `SysWOW64` across all 5 WoW64-enabled images, adds 46 missing `gdi32.dll` (40 exports), `user32.dll` (`MapVirtualKeyExA`), `shell32.dll` (`SHGetPathFromIDListW`, `DragQueryFileW`, `SHGetSpecialFolderLocation`), `winspool.drv` (`GetJobA`), and `winmm.dll` (`PlaySoundA`) exports, redirects broken `shell32.dll` forwarders (`windows.storage.dll.*`) to `nanoserver_sta_shim.dll`, and removes `SHELL32` and `gdiplus` from `KnownDLLs`. |
 
 ---
 
@@ -92,8 +93,8 @@ Every folder is cleanly separated into three parts:
    - Runs `NativeShimRegression.exe --require-shim` in a fresh process before the managed modes. Its shared source is `sta-shim\tests\native_regression.cpp`; normal `user32.dll` imports avoid managed interception and report final call targets.
    - Builds and executes all unit tests inside `FROM adaskothebeast/nanoserver:<flavour>` across all 4 STA shim toggle modes (`Default`, `OS-Level STA Shim Only`, `Library In-Process STA Shim Only`, and `Both Disabled + Runtime Toggle`).
 
-> ⚠️ **Note on `.exe` Binaries & Bitdefender False Positive (`NativeShimRegression`):**
-> All `.exe` files (`install_sta_shim.exe`, `iis_service_monitor.exe`, `NativeShimRegression_x86.exe`, `NativeShimRegression_x64.exe`, and `Tests\native\NativeShimRegression.exe`) are excluded from Git via `.gitignore` and compiled locally from C++ source when you run `sta-shim\build_shim.ps1` (or root `.\go.ps1`).
+> ⚠️ **Note on `.exe` Binaries, `nanoserver-*/sta-shim` Staging Folders & Bitdefender False Positive (`NativeShimRegression`):**
+> All `.exe` files (`install_sta_shim.exe`, `iis_service_monitor.exe`, `NativeShimRegression_x86.exe`, `NativeShimRegression_x64.exe`, and `Tests\native\NativeShimRegression.exe`) and the per-flavour `nanoserver-*\sta-shim\` staging directories are excluded from Git via `.gitignore` and compiled/populated locally from `sta-shim\` when you run `sta-shim\build_shim.ps1`, root `.\go.ps1`, or any flavour's `.\<flavour>\go.ps1`.
 > For unknown heuristic reasons, **Bitdefender** may flag the compiled `NativeShimRegression` executable (`NativeShimRegression.exe` / `NativeShimRegression_x86.exe` / `NativeShimRegression_x64.exe`) as unsafe or suspicious. This binary is compiled directly from [`sta-shim\tests\native_regression.cpp`](./sta-shim/tests/native_regression.cpp) and only exercises local Win32 windowing, message-queue, and IAT-hook regression assertions. If Bitdefender blocks or quarantines it during local builds, add an antivirus exclusion for your working directory or for `NativeShimRegression*.exe`.
 
 ---
@@ -159,48 +160,62 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.4.0`, `-v1.4`, `-v1`).
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.5.0`, `-v1.5`, `-v1`).
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.4.0, -v1.4, and -v1
-.\set-version.ps1 -Version 1.4.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v1.5.0, -v1.5, and -v1
+.\set-version.ps1 -Version 1.5.0
 
 # Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.4.0 -DotNetVersion 10.0.14
+.\set-version.ps1 -Version 1.5.0 -DotNetVersion 10.0.14
 ```
 
 - **ASP.NET Core 10 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.4.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.4`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.5.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.5`
   - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
 - **ASP.NET Core 10 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.4.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.4`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.5.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.5`
   - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.4.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.4`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.5.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.5`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.4.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.4`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.5.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.5`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.4.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.4`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.5.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.5`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.4.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.4`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.5.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.5`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
+
+---
+
+## ✨ What's New in `v1.5.0`
+
+Container revision **`1.5.0`** adds end-to-end support for **legacy 32-bit Visual C++ 10.0 / MFC 10.0 (`mfc100u.dll` / `mfc100.dll` / `atl100.dll`) and GDI+ (`gdiplus.dll`) calculation libraries** plus **broken PE forwarder redirection in `shell32.dll`** on Windows Nano Server 2025 (see [`CHANGELOG.md`](./CHANGELOG.md) and [Breakthrough #5 below](#7-breakthrough-5-running-legacy-32-bit-visual-c-100--mfc-mfc100udll--gdi-gdiplusdll-calculation-libraries--redirecting-broken-shell32dll-forwarders)):
+
+- **Build-Time Provisioned 32-Bit Visual C++ 10.0 / MFC 10.0, GDI+ & Imaging Runtimes (`SysWOW64`):** The five WoW64-enabled Dockerfiles (`aspnet-x86`, `iis-aspnet-x64`, `iis-aspnet-x86`, `iis-netfx-x64`, `iis-netfx-x86`) download and extract `msvbvm60.dll` (`6.00.9848` from Microsoft's symbol server), the official Microsoft Visual C++ 2010 SP1 MFC Security Update redistributable (`KB2565063` / `vcredist_x86.exe` $\rightarrow$ `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`), and Server Core's `msimg32.dll` and `WinSxS` `gdiplus.dll` in their `windowsservercore-ltsc2025` `installer` build stage (`C:\wow64_runtimes\`), then preflight and install all 8 DLLs into `C:\Windows\SysWOW64` via `install_sta_shim.exe --require-wow64`—keeping third-party/Microsoft redistributable binaries out of the Git repository.
+- **46 Additional Static & Delay-Loaded Shim Exports (`gdi32.dll`, `user32.dll`, `shell32.dll`, `winspool.drv`, `winmm.dll`):**
+  - **`gdi32.dll` (40 exports):** `AbortPath`, `AngleArc`, `ArcTo`, `Chord`, `CombineTransform`, `CopyMetaFileW`, `CreateEllipticRgn`, `DrawEscape`, `EnumEnhMetaFile`, `ExtFloodFill`, `FlattenPath`, `FrameRgn`, `GdiComment`, `GetArcDirection`, `GetBoundsRect`, `GetDCDpiScaleValue`, `GetGraphicsMode`, `GetMiterLimit`, `GetPath`, `GetPolyFillMode`, `GetStretchBltMode`, `GetSystemPaletteUse`, `IsValidEnhMetaRecordOffExt`, `ModifyWorldTransform`, `OffsetClipRgn`, `PlayEnhMetaFileRecord`, `PlayMetaFileRecord`, `PolyBezier`, `PolyDraw`, `PolyPolygon`, `PolyPolyline`, `PolylineTo`, `PtVisible`, `ResizePalette`, `ScaleRgn`, `SetArcDirection`, `SetBitmapBits`, `SetColorAdjustment`, `SetMapperFlags`, `SetMiterLimit`, `SetPaletteEntries`, and `SetTextJustification` (bringing `gdi32.dll` to 61 shimmed forwarder exports).
+  - **`user32.dll` (1 export):** `MapVirtualKeyExA` (bringing `user32.dll` to 20 shimmed forwarder exports).
+  - **`shell32.dll` (3 exports):** `SHGetPathFromIDListW`, `DragQueryFileW`, and `SHGetSpecialFolderLocation`.
+  - **`winspool.drv` & `winmm.dll` (2 delay-loaded exports):** `GetJobA` and `PlaySoundA`.
+- **Broken PE Forwarder Redirection (`shell32.dll` $\rightarrow$ `windows.storage.dll.*`):** On stock Nano Server 2025, `shell32.dll` already exports `SHGetPathFromIDListW`, `DragQueryFileW`, and `SHGetSpecialFolderLocation`, but as **dangling forwarder strings** pointing to `windows.storage.dll.*` (a desktop shell DLL absent from Nano Server), causing `ntdll!LdrpSnapModule` to fail with `STATUS_ORDINAL_NOT_FOUND` / `ERROR_PROC_NOT_FOUND (127)` when loading `mfc100u.dll`. `install_sta_shim.exe` (`PatchPeFileExports` and `VerifyPatchedPe`) now detects existing forwarders targeting unavailable modules and redirects them in-place to `nanoserver_sta_shim.<ExportName>`, while removing `SHELL32` and `gdiplus` from `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`.
 
 ---
 
@@ -236,6 +251,7 @@ Container revision **`1.3.0`** completes the full [Roundtable review (`R01`–`R
 | ⚠️ **SxS Registration-Free COM via `CreateActCtxW` (`*.manifest`)** | **Blocked by `apisetschema.dll` (even if `sxs.dll` is copied)** | `KernelBase!CreateActCtxW` checks `IsCreateActCtxWWorkerPresent()` (`ext-ms-win-kernel32-sidebyside-l1-1-0`) in the kernel-mapped `apisetschema.dll` *before* calling `sxs.dll`, returning `ERROR_INVALID_FUNCTION (1)`. Copying Server Core's `apisetschema.dll` or `sxssrv.dll` breaks container silo boot (`0xc0370111` at `hcs::System::Start`) because Server Core's schema redirects console/windowing API sets away from Nano Server's headless `coniosrv.dll`. |
 | ✅ **Registration-Free COM with `.manifest` via `DllGetClassObject` + `CoRegisterClassObject` Fallback** | **Exercised by the included COM fixtures** | Verified with `NativeCOM.dll` + `NativeCOM.manifest`: when `CreateActCtxW` returns `ERROR_INVALID_FUNCTION (1)`, parsing `<comClass clsid="{...}"/>` from the `.manifest` file, calling `DllGetClassObject` on the COM DLL, and registering the `IClassFactory` in-memory via `combase!CoRegisterClassObject(..., CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, out cookie)` allows `new StringConcatenatorClass()` (`CoCreateInstance`) to succeed with `S_OK` on both `x86` and `x64` Nano Server without `regsvr32` or OS modifications! |
 | ✅ **32-Bit Visual Basic 6 (`msvbvm60.dll`) ActiveX/COM DLLs & Registration-Free `IDispatch` TypeLib Marshaling** | **Supported in all 5 WoW64-enabled images (`v1.4.0+`)** | Pre-installs `SysWOW64\msvbvm60.dll`, adds 35 missing `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` PE forwarder exports, provides ANSI window/class/message/clipboard and headless 96-DPI GDI shims for VB6 runtime startup (`VBBubbleRT6`, `VBFocusRT6`, `IDEOwner`), and redirects `oleaut32!LoadRegTypeLib` (`SxsOleAut32RedirectTypeLibrary`) to embedded `TYPELIB` PE resources via `LoadTypeLibEx(..., REGKIND_NONE, ...)`. |
+| ✅ **32-Bit Visual C++ 10.0 / MFC 10.0 (`mfc100u.dll`, `mfc100.dll`, `atl100.dll`, `msvcr100.dll`, `msvcp100.dll`) & GDI+ (`gdiplus.dll`) Native Calculation DLLs** | **Supported in all 5 WoW64-enabled images (`v1.5.0+`)** | Pre-installs `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`, `msimg32.dll`, and `gdiplus.dll` into `SysWOW64`, adds 46 missing exports across `gdi32.dll`, `user32.dll`, `shell32.dll`, `winspool.drv`, and `winmm.dll`, and redirects broken `shell32.dll` forwarders (`windows.storage.dll.*`) to `nanoserver_sta_shim.dll`. |
 | **Single-Threaded Apartment (`STA`) and Win32 message pumping** | **Scoped headless implementation, not full Win32 parity** | Native OS-level shimming and the external managed NuGet shim are separate implementations. See the support table below and run the native and managed regression suites for your build. Exact unshimmed failure codes, including `E_NOTIMPL`, depend on the OS build and call path and are not guaranteed here. |
 
 ### Native STA shim support and limitations
@@ -260,6 +276,7 @@ and `WAS`/`W3SVC` host-loss qualification pass across all six flavours; see
 | Timers, waits and queue status (R05, R06) | Lazy owner-thread deadlines, low-priority `WM_TIMER`, replacement/cancellation, typed current/changed queue bits, wake masks and the three documented MWMO flags | Timer delivery requires pumping and is not real-time; coalescing tolerance is ignored. Wait-all uses bounded waits to keep servicing sent messages. No physical input or painting subsystem. |
 | ANSI window, class, message and clipboard APIs (`v1.4.0+`) | `RegisterClass[Ex]A`, `UnregisterClassA`, `GetClassInfo[Ex]A`, `GetClassNameA`, `Get/SetClassLongA`, `CreateWindowExA`, `DefWindowProcA`, `CallWindowProcA`, `Get/SetWindowLong[Ptr]A`, `Peek/Get/Dispatch/Post/SendMessageA`, `PostThreadMessageA`, and `Register/GetClipboardFormat[Name]A` bridged to the user-mode STA window engine | Headless STA windowing and message dispatch only; does not translate complex message-specific ANSI/Unicode `lParam` structures beyond `WM_NCCREATE`/`WM_CREATE`. |
 | Headless GDI, screen metrics, DDE & OLE1 forwarders (`v1.4.0+`) | 96-DPI headless device contexts (`GetDC`, `GetDeviceCaps`, `GetStockObject`, `GetSystemMetrics`, `SelectObject`, `DeleteObject`, `GetTextMetricsA/W`, `GetSysColorBrush`) plus 35 static PE forwarders across `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` | Synthetic handles and fixed 96-DPI/font metrics for headless runtime startup (`msvbvm60.dll`, VCL, ATL). Not a replacement for a physical display, GDI rendering, or DDE conversation transport. |
+| Visual C++ 10.0 / MFC 10.0, GDI+ & `shell32.dll` broken-forwarder redirection (`v1.5.0+`) | Pre-installed 32-bit `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`, `msimg32.dll`, and `gdiplus.dll` in `SysWOW64`; 40 additional `gdi32.dll` path/transform/metafile/region/palette exports, `user32!MapVirtualKeyExA`, `winspool.drv!GetJobA`, `winmm!PlaySoundA`, and redirection of `shell32.dll`'s broken `windows.storage.dll.*` forwarders (`SHGetPathFromIDListW`, `DragQueryFileW`, `SHGetSpecialFolderLocation`) | Headless compatibility stubs so `mfc100u.dll`, `mfc100.dll`, and `gdiplus.dll` load and initialize cleanly in headless containers; does not provide interactive shell dialogs, printing, audio playback, or full metafile rendering. |
 | Registration-free TypeLib redirection (`v1.4.0+`) | Hooks `oleaut32.dll` (`ext-ms-win-sxs-oleautomation-l1-1-0!SxsOleAut32RedirectTypeLibrary`) and scans loaded modules in the current process for embedded `TYPELIB` resources matching the requested `LIBID` via `LoadTypeLibEx(..., REGKIND_NONE, ...)` | Resolves `TYPELIB` resources embedded in already-loaded process DLLs; external standalone `.tlb` files that are not loaded as modules require explicit loading or registry entries. |
 | Hook memory protection (R17, R19) | Serialized writes, no-op skipping, derived-address bounds checks and original page-protection restoration | Non-executable data pages become writable without execute access. An already-executable page may briefly become writable and executable. This is not a blanket W^X guarantee. |
 
@@ -604,26 +621,31 @@ The native C++ shim and the external C# package both provide headless window/mes
 
 1. **Container build:** `install_sta_shim.exe` refuses a host with
    `System32\win32u.dll`. It preflights the payload and the `user32.dll`,
-   `ole32.dll`, `gdi32.dll` and `comctl32.dll` forwarders for each selected
-   architecture before changing system files. The five images that install
-   WOW64 pass `--require-wow64` (`/require-x86` is an alias); x64 Kestrel does
-   not require an x86 payload.
+   `ole32.dll`, `gdi32.dll`, `comctl32.dll`, and `shell32.dll` forwarders for
+   each selected architecture before changing system files. The five images that
+   install WOW64 pass `--require-wow64` (`/require-x86` is an alias) and also
+   preflight and install the eight 32-bit runtime DLLs (`msvbvm60.dll`,
+   `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`,
+   `msimg32.dll`, and `gdiplus.dll`) into `C:\Windows\SysWOW64`; x64 Kestrel
+   does not require an x86 payload.
 2. **File replacement:** the installer stages PE changes in `.new`, flushes and
    verifies them, moves the untouched original to `.orig`, and restores it if
-   replacement fails. It patches API-query imports and adds missing export
-   forwarders to `nanoserver_sta_shim.<ExportName>`. Both the forwarder and
-   system-directory copies are re-read and checked. Each required failure
-   returns nonzero. KnownDLLs entries for `user32`, `ole32` and `gdi32` are
-   removed only after the files have passed verification; already-absent
+   replacement fails. It patches API-query imports, adds missing export
+   forwarders to `nanoserver_sta_shim.<ExportName>`, and redirects existing
+   broken forwarders (such as `windows.storage.dll.*` in `shell32.dll`) to
+   `nanoserver_sta_shim.<ExportName>`. Both the forwarder and system-directory
+   copies are re-read and checked. Each required failure returns nonzero.
+   KnownDLLs entries for `user32`, `ole32`, `gdi32`, `SHELL32`, and `gdiplus`
+   are removed only after the files have passed verification; already-absent
    values count as success. Installation is not a transaction across all files;
    a failed Docker build must not be published.
 3. **Process load:** processes that load a patched forwarder also load
    `nanoserver_sta_shim.dll`. The shim redirects API-query and delay-load slots
-   in `combase.dll`, `user32.dll` and `ole32.dll`. The presence functions are
-   `Shim_ApiSetQueryApiSetPresence` and `Shim_ApiSetQueryApiSetPresenceEx`, not
-   an unconditional replacement for every API namespace. Cache discovery is
-   range-checked; a captured module is rewritten only when its enable state
-   changes or a previous write failed.
+   in `combase.dll`, `user32.dll`, `ole32.dll`, `gdi32.dll`, and `oleaut32.dll`.
+   The presence functions are `Shim_ApiSetQueryApiSetPresence` and
+   `Shim_ApiSetQueryApiSetPresenceEx`, not an unconditional replacement for
+   every API namespace. Cache discovery is range-checked; a captured module is
+   rewritten only when its enable state changes or a previous write failed.
 4. **Execution:** process-local window, class, timer and queue tables use
    `CRITICAL_SECTION` locks. Window procedures run outside the window lock,
    on the owner thread. The thread registers its own queue for FLS cleanup.
@@ -739,6 +761,27 @@ Bringing a legacy 32-bit VB6 ActiveX/COM library onto Windows Nano Server 2025 w
      - We added `"ext-ms-win-sxs-oleautomation-l1-"` to `kShimmedPrefixes`, hooked `oleaut32.dll` in `RefreshHooksLocked()` / `OnDllNotification()`, and implemented `Shim_SxsOleAut32RedirectTypeLibrary`:
      - When `oleaut32!LoadRegTypeLib` asks for `rguid` (`LIBID`), `Shim_SxsOleAut32RedirectTypeLibrary` enumerates the loaded modules in the current process (`K32EnumProcessModules`), calls `oleaut32!LoadTypeLibEx(modulePath, REGKIND_NONE, &pCandidate)` on each module that carries an embedded `TYPELIB` PE resource, compares `pCandidate->GetLibAttr(&pAttr)->guid` against the requested `rguid`, and returns the matching `ITypeLib*` directly in memory!
      - Because `REGKIND_NONE` parses the embedded `TYPELIB` resource straight from the mapped PE image without writing to the registry, **every VB6 dual-interface method call, property access, user-defined struct/enum, and internal `ITypeInfo` lookup succeeds with `S_OK` at full native speed—with zero `regsvr32` or `HKCR\TypeLib` registry state.**
+
+### 7. Breakthrough #5: Running Legacy 32-Bit Visual C++ 10.0 / MFC (`mfc100u.dll`) & GDI+ (`gdiplus.dll`) Calculation Libraries & Redirecting Broken `shell32.dll` Forwarders
+
+Another major class of OEM engineering and HVAC calculation engines (such as the DBM heat exchanger calculation suite: `calcdll.dll`, `cmpdll.dll`, `cond.dll`, `evap.dll`, `gas.dll`, `hhsd.dll`, `liquidi.dll`) is compiled with **32-bit Visual C++ 10.0 (`VS 2010`) and dynamically linked against the Unicode Microsoft Foundation Classes (`mfc100u.dll` / `mfc100.dll`), ATL (`atl100.dll`), the VC++ 10.0 CRT (`msvcr100.dll` / `msvcp100.dll`), and GDI+ (`gdiplus.dll`)**.
+
+Even when these DLLs expose plain `__stdcall` C entry points (`SetPricePath`, `StartJob`) and perform purely numerical thermodynamic and pricing calculations, loading `mfc100u.dll` and `gdiplus.dll` inside Windows Nano Server 2025 hits three distinct OS-loader roadblocks:
+
+1. **Missing 32-Bit VC++ 10.0, MFC 10.0, `msimg32.dll` & `gdiplus.dll` Runtimes in `SysWOW64` (Provisioned in Stage 1 of Multi-Stage Docker Builds):**
+   - Nano Server's `Microsoft.NanoServer.Datacenter.WOWSupport` package does not include the Visual C++ 2010 redistributable (`msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`), `msimg32.dll` (statically imported by `mfc100u.dll` for `AlphaBlend` / `TransparentBlt` / `GradientFill`), or `gdiplus.dll` (statically imported by `cmpdll.dll` and delay-loaded by `mfc100u.dll`).
+   - Rather than committing Microsoft redistributable DLLs into the Git repository, all five WoW64 Dockerfiles harvest these 8 32-bit DLLs into `C:\wow64_runtimes\` during Stage 1 (`FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer`):
+     - `msvbvm60.dll` (`6.00.9848`) is downloaded directly from the Microsoft Symbol Server (`https://msdl.microsoft.com/download/symbols/msvbvm60.dll/5EA8E7BC15d000/msvbvm60.dll`).
+     - `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, and `mfc100u.dll` (`10.0.40219.325`) are installed in the `installer` stage from the official Microsoft Visual C++ 2010 SP1 MFC Security Update redistributable (`KB2565063`, `vcredist_x86.exe /q /norestart`) and copied from `C:\Windows\SysWOW64\`.
+     - `msimg32.dll` and `gdiplus.dll` are copied from the `windowsservercore-ltsc2025` `installer` image (`C:\Windows\SysWOW64\msimg32.dll` and `C:\Windows\WinSxS\x86_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.*\GdiPlus.dll`).
+   - Stage 2 copies `C:\wow64_runtimes\` into `C:\install\sta-shim\` via `COPY --from=installer`, and `install_sta_shim.exe --require-wow64` preflights (`IMAGE_FILE_MACHINE_I386`) and installs all 8 DLLs into `C:\Windows\SysWOW64` while removing `gdiplus` from `KnownDLLs` so the 32-bit `SysWOW64\gdiplus.dll` loads cleanly from disk.
+2. **41 Missing Static PE Exports Across `gdi32.dll` and `user32.dll` (+ 2 Delay-Loaded Print/Audio Stubs):**
+   - `mfc100u.dll` (over 4.4 MB of framework code) and `gdiplus.dll` statically import **40 GDI path, world-transform, metafile, region, and palette functions** from `gdi32.dll` (`AbortPath`, `AngleArc`, `ArcTo`, `Chord`, `CombineTransform`, `CopyMetaFileW`, `CreateEllipticRgn`, `DrawEscape`, `EnumEnhMetaFile`, `ExtFloodFill`, `FlattenPath`, `FrameRgn`, `GdiComment`, `GetArcDirection`, `GetBoundsRect`, `GetDCDpiScaleValue`, `GetGraphicsMode`, `GetMiterLimit`, `GetPath`, `GetPolyFillMode`, `GetStretchBltMode`, `GetSystemPaletteUse`, `IsValidEnhMetaRecordOffExt`, `ModifyWorldTransform`, `OffsetClipRgn`, `PlayEnhMetaFileRecord`, `PlayMetaFileRecord`, `PolyBezier`, `PolyDraw`, `PolyPolygon`, `PolyPolyline`, `PolylineTo`, `PtVisible`, `ResizePalette`, `ScaleRgn`, `SetArcDirection`, `SetBitmapBits`, `SetColorAdjustment`, `SetMapperFlags`, `SetMiterLimit`, `SetPaletteEntries`, `SetTextJustification`) plus `MapVirtualKeyExA` from `user32.dll`, and delay-load `winspool.drv!GetJobA` and `winmm.dll!PlaySoundA`.
+   - `install_sta_shim.exe` and `nanoserver_sta_shim.dll` now export and forward all 43 symbols so `ntdll!LdrpSnapModule` snaps every static import of `mfc100u.dll`, `mfc100.dll`, and `gdiplus.dll`.
+3. **Dangling PE Forwarders Inside Nano Server's `shell32.dll` (`windows.storage.dll.*`):**
+   - Unlike `gdi32.dll` or `user32.dll` where missing symbols were simply omitted from `.edata`, Nano Server's `C:\Windows\SysWOW64\forwarders\shell32.dll` (and `System32\forwarders\shell32.dll`) **already contains** export entries for `SHGetPathFromIDListW`, `DragQueryFileW`, and `SHGetSpecialFolderLocation`—imported statically by `mfc100u.dll`.
+   - However, those three export table entries are **PE forwarder strings** pointing to `windows.storage.dll.SHGetPathFromIDListW`, `windows.storage.dll.DragQueryFileW`, and `windows.storage.dll.SHGetSpecialFolderLocation`. Because `windows.storage.dll` is a desktop shell binary that does not exist on Nano Server, `ntdll!LdrpSnapModule` follows the forwarder string during `LoadLibraryExW("mfc100u.dll")` and aborts module loading with `ERROR_MOD_NOT_FOUND (126)` / `ERROR_PROC_NOT_FOUND (127)`!
+   - **How `install_sta_shim.exe` Fixes Broken Forwarders:** We enhanced `PatchPeFileExports` and `VerifyPatchedPe` in `install_sta_shim.cpp` (`IsBrokenForwarderTarget`) so that when a required export already exists in a system forwarder DLL as a forwarder targeting a missing desktop DLL (`windows.storage.dll.*`), the export-table rebuilder **redirects that existing export entry in-place** to `nanoserver_sta_shim.<ExportName>` and removes `SHELL32` from `KnownDLLs`.
 
 ---
 

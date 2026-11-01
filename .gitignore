@@ -427,8 +427,9 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
-# Native executables (rebuilt locally via sta-shim/build_shim.ps1)
+# Native executables and per-flavour sta-shim staging folders (rebuilt/synced locally via go.ps1 / sta-shim/build_shim.ps1)
 *.exe
+nanoserver-*/sta-shim/
 
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache

@@ -306,7 +306,7 @@ std::vector<BYTE> Fixture(WORD machine) {
 
 void Reset(bool wow64 = true) {
     files.clear(); handles.clear(); directories.clear();
-    knownDlls = {L"user32", L"ole32", L"gdi32"};
+    knownDlls = {L"user32", L"ole32", L"gdi32", L"SHELL32", L"gdiplus"};
     fault = Fault::None; failAt = 1; faultCalls = copies = registryDeletes = mutations = 0;
     faultHit = liveTruncated = unsafeFileOpen = false;
     directories.insert(L"C:\\payload");
@@ -317,7 +317,7 @@ void Reset(bool wow64 = true) {
         WORD machine = isWow ? IMAGE_FILE_MACHINE_I386 : IMAGE_FILE_MACHINE_AMD64;
         directories.insert(system);
         directories.insert(system + L"\\forwarders");
-        for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll"}) {
+        for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll"}) {
             files[system + L"\\forwarders\\" + name] = {Fixture(machine)};
             files[system + L"\\" + name] = {Fixture(machine)};
         }
@@ -343,7 +343,7 @@ void Check(const char* name, bool success) {
 
 int main() {
     Reset(false);
-    Check("R02_x64_without_x86_payload", Install(false) == 0 && registryDeletes == 3);
+    Check("R02_x64_without_x86_payload", Install(false) == 0 && registryDeletes == 5);
     Reset(false);
     Check("R02_required_wow64_preflight", Install() != 0 && mutations == 0);
     Reset(false);
@@ -387,7 +387,7 @@ int main() {
     Reset(); fault = Fault::RegDelete;
     Check("R02_registry_delete_failure", Install() != 0 && faultHit && registryDeletes == 1);
     Reset(); knownDlls.clear();
-    Check("R02_already_absent_values", Install() == 0 && registryDeletes == 3);
+    Check("R02_already_absent_values", Install() == 0 && registryDeletes == 5);
     Reset();
     Check("R02_install_success", Install() == 0 && !liveTruncated && knownDlls.empty());
     Check("R02_protected_writes_use_backup_intent", !unsafeFileOpen);
@@ -395,12 +395,28 @@ int main() {
     Check("R02_repeat_install", Install() == 0 && files.size() == installed.size() && !liveTruncated);
     Check("R02_verified_PE32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\user32.dll", kUser32Exports));
     Check("R02_verified_PE32_ole32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\ole32.dll", kOle32Exports));
+    Check("R02_verified_PE32_shell32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\shell32.dll", kShell32Exports));
     Check("R02_verified_PE64_exports", VerifyPatchedPe(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", kGdi32Exports));
     files[L"C:\\Windows\\System32\\forwarders\\gdi32.dll"].Bytes[0] = 0;
     Check("R02_verification_rejects_corruption", !VerifyPatchedPe(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", kGdi32Exports));
     Reset();
-    files[L"C:\\payload\\msvbvm60.dll"] = {Fixture(IMAGE_FILE_MACHINE_I386)};
-    Check("R02_optional_vb6_runtime_copied", Install() == 0 && files.count(L"C:\\Windows\\SysWOW64\\msvbvm60.dll") == 1);
+    for (const wchar_t* dll : kOptionalWow64RuntimeDlls) {
+        files[std::wstring(L"C:\\payload\\") + dll] = {Fixture(IMAGE_FILE_MACHINE_I386)};
+    }
+    bool allRuntimesCopied = (Install() == 0);
+    for (const wchar_t* dll : kOptionalWow64RuntimeDlls) {
+        allRuntimesCopied = allRuntimesCopied && (files.count(std::wstring(L"C:\\Windows\\SysWOW64\\") + dll) == 1);
+    }
+    Check("R02_optional_wow64_runtimes_copied", allRuntimesCopied);
+    Reset();
+    const wchar_t* shell32Target = L"C:\\Windows\\SysWOW64\\forwarders\\shell32.dll";
+    *reinterpret_cast<DWORD*>(files[shell32Target].Bytes.data() + 0x640) = 0x20A0;
+    memcpy(files[shell32Target].Bytes.data() + 0x680, "SHGetPathFromIDListW", 21);
+    memcpy(files[shell32Target].Bytes.data() + 0x6A0, "windows.storage.dll.SHGetPathFromIDListW", 41);
+    Check("R02_broken_forwarder_rejected_before_patch", !VerifyPatchedPe(shell32Target, kShell32Exports));
+    Check("R02_broken_forwarder_redirected_to_shim",
+        PatchPeFileImports(shell32Target) && PatchPeFileExports(shell32Target, kShell32Exports) &&
+        VerifyPatchedPe(shell32Target, kShell32Exports));
     Reset();
     const wchar_t* target = L"C:\\Windows\\System32\\forwarders\\user32.dll";
     original = files[target].Bytes;

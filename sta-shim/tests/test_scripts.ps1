@@ -115,6 +115,7 @@ exit /b 0
         if ($flavour -ne "nanoserver-aspnet-x64") {
             Assert-Check "R11_${flavour}_wow64_marker" ($dockerfile.Contains("SysWOW64\ntdll.dll"))
             Assert-Check "R02_${flavour}_requires_wow64" ($dockerfile.Contains("--require-wow64"))
+            Assert-Check "R02_${flavour}_copies_wow64_runtimes" ($dockerfile.Contains('COPY --from=installer ["C:/wow64_runtimes/", "C:/install/sta-shim/"]'))
         }
         if ($flavour.Contains("-netfx-")) {
             $copy = $dockerfile.IndexOf("COPY --from=installer")
@@ -152,7 +153,7 @@ function global:docker {
     $global:LASTEXITCODE = 0
 }
 Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
-& (Join-Path $PSScriptRoot "push.ps1") -Version 1.4.0
+& (Join-Path $PSScriptRoot "push.ps1") -Version 1.5.0
 '@
     $mockPath = Join-Path $publish "mock_publish.ps1"
     Set-Content -LiteralPath $mockPath -Value $mock
@@ -165,8 +166,8 @@ Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
     Assert-Check "R13_all_six_flavours_reached" ($calls.Count -eq 42)
     foreach ($flavour in $flavours) {
         $content = Get-Content -LiteralPath (Join-Path $publish "$flavour\push.ps1") -Raw
-        Assert-Check "version_${flavour}_1_4_0" ($content.Contains("-ltsc2025-v1.4.0") -and
-            $content.Contains("-ltsc2025-v1.4") -and $content.Contains("-ltsc2025-v1"))
+        Assert-Check "version_${flavour}_1_5_0" ($content.Contains("-ltsc2025-v1.5.0") -and
+            $content.Contains("-ltsc2025-v1.5") -and $content.Contains("-ltsc2025-v1"))
     }
 } finally {
     $env:FAKE_DISM_CODE = $savedDism

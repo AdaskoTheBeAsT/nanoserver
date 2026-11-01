@@ -54,14 +54,6 @@ try {
 
     Remove-Item -LiteralPath "nanoserver_sta_shim.obj", "nanoserver_sta_shim.exp", "nanoserver_sta_shim.lib", "install_sta_shim.obj", "iis_service_monitor.obj", "native_regression_x86.obj", "native_regression_x64.obj" -Force -ErrorAction SilentlyContinue
 
-    $vb6RuntimePath = Join-Path $PSScriptRoot "msvbvm60.dll"
-    if (-not (Test-Path -LiteralPath $vb6RuntimePath)) {
-        $hostVb6Runtime = Join-Path $env:SystemRoot "SysWOW64\msvbvm60.dll"
-        if (Test-Path -LiteralPath $hostVb6Runtime) {
-            Copy-Item -LiteralPath $hostVb6Runtime -Destination $vb6RuntimePath -Force
-        }
-    }
-
     $flavours = @(
         "nanoserver-aspnet-x86",
         "nanoserver-aspnet-x64",
@@ -77,9 +69,6 @@ try {
             New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
         }
         Copy-Item -Path "nanoserver_sta_shim_x86.dll", "nanoserver_sta_shim_x64.dll", "install_sta_shim.exe", "iis_service_monitor.exe" -Destination $targetDir -Force
-        if ($flavour -ne "nanoserver-aspnet-x64" -and (Test-Path -LiteralPath $vb6RuntimePath)) {
-            Copy-Item -LiteralPath $vb6RuntimePath -Destination (Join-Path $targetDir "msvbvm60.dll") -Force
-        }
         $architecture = if ($flavour.EndsWith("-x86")) { "x86" } else { "x64" }
         Copy-Item -LiteralPath "NativeShimRegression_$architecture.exe" -Destination (Join-Path (Split-Path $PSScriptRoot -Parent) "$flavour\Tests\native\NativeShimRegression.exe") -Force
     }

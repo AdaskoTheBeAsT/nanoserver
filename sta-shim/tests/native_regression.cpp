@@ -718,6 +718,28 @@ void TestAnsiAndHeadlessGdi(bool shim) {
             FreeLibrary(vb6);
         }
     }
+    if (sizeof(void*) == 4 && GetFileAttributesW(L"C:\\Windows\\SysWOW64\\mfc100u.dll") != INVALID_FILE_ATTRIBUTES) {
+        HMODULE msimg = LoadLibraryW(L"msimg32.dll");
+        HMODULE gdip = LoadLibraryW(L"gdiplus.dll");
+        HMODULE msvcr = LoadLibraryW(L"msvcr100.dll");
+        HMODULE msvcp = LoadLibraryW(L"msvcp100.dll");
+        HMODULE atl = LoadLibraryW(L"atl100.dll");
+        HMODULE mfc = LoadLibraryW(L"mfc100.dll");
+        HMODULE mfcu = LoadLibraryW(L"mfc100u.dll");
+        HMODULE shell32 = LoadLibraryW(L"shell32.dll");
+        FARPROC shGetPath = shell32 ? GetProcAddress(shell32, "SHGetPathFromIDListW") : nullptr;
+        Check("VC10_mfc100u_gdiplus_and_shell32_load",
+            msimg != nullptr && gdip != nullptr && msvcr != nullptr && msvcp != nullptr &&
+            atl != nullptr && mfc != nullptr && mfcu != nullptr && shGetPath != nullptr);
+        if (shell32) FreeLibrary(shell32);
+        if (mfcu) FreeLibrary(mfcu);
+        if (mfc) FreeLibrary(mfc);
+        if (atl) FreeLibrary(atl);
+        if (msvcp) FreeLibrary(msvcp);
+        if (msvcr) FreeLibrary(msvcr);
+        if (gdip) FreeLibrary(gdip);
+        if (msimg) FreeLibrary(msimg);
+    }
 }
 
 void TestRouting(bool requireShim) {

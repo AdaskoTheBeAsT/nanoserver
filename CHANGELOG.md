@@ -6,6 +6,65 @@ applications, and build tooling.
 Versions below identify the repository and container revision, not the bundled
 .NET runtime version.
 
+## 1.5.0 - 2026-11-01
+
+### Added
+
+- Full 32-bit Visual C++ 10.0 / MFC 10.0 (`mfc100u.dll`, `mfc100.dll`,
+  `atl100.dll`, `msvcr100.dll`, `msvcp100.dll`), `gdiplus.dll`, and `msimg32.dll`
+  runtime and forwarder support on Windows Nano Server 2025:
+  - Provisioned `msvbvm60.dll` (from Microsoft's symbol server), `msvcr100.dll`,
+    `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, and `mfc100u.dll` (from the
+    official Microsoft VC++ 2010 SP1 KB2565063 `vcredist_x86.exe`
+    redistributable), plus `msimg32.dll` and `gdiplus.dll` (from Server Core's
+    `SysWOW64` and `WinSxS`) during Stage 1 (`AS installer`) of all five
+    WoW64-enabled Dockerfiles (`aspnet-x86`, `iis-aspnet-x64`, `iis-aspnet-x86`,
+    `iis-netfx-x64`, and `iis-netfx-x86`), and installed them into
+    `C:\Windows\SysWOW64` via `install_sta_shim.exe --require-wow64` instead of
+    storing the redistributable DLLs in the Git repository.
+  - Added 46 missing static and delay-loaded exports required by `mfc100u.dll`,
+    `mfc100.dll`, and `gdiplus.dll` to `nanoserver_sta_shim.dll` and
+    `install_sta_shim.exe`:
+    - `gdi32.dll` (40 exports): `AbortPath`, `AngleArc`, `ArcTo`, `Chord`,
+      `CombineTransform`, `CopyMetaFileW`, `CreateEllipticRgn`, `DrawEscape`,
+      `EnumEnhMetaFile`, `ExtFloodFill`, `FlattenPath`, `FrameRgn`,
+      `GdiComment`, `GetArcDirection`, `GetBoundsRect`, `GetDCDpiScaleValue`,
+      `GetGraphicsMode`, `GetMiterLimit`, `GetPath`, `GetPolyFillMode`,
+      `GetStretchBltMode`, `GetSystemPaletteUse`,
+      `IsValidEnhMetaRecordOffExt`, `ModifyWorldTransform`, `OffsetClipRgn`,
+      `PlayEnhMetaFileRecord`, `PlayMetaFileRecord`, `PolyBezier`, `PolyDraw`,
+      `PolyPolygon`, `PolyPolyline`, `PolylineTo`, `PtVisible`, `ResizePalette`,
+      `ScaleRgn`, `SetArcDirection`, `SetBitmapBits`, `SetColorAdjustment`,
+      `SetMapperFlags`, `SetMiterLimit`, `SetPaletteEntries`, and
+      `SetTextJustification`.
+    - `user32.dll` (1 export): `MapVirtualKeyExA`.
+    - `shell32.dll` (3 exports): `SHGetPathFromIDListW`, `DragQueryFileW`, and
+      `SHGetSpecialFolderLocation`.
+    - `winspool.drv` & `winmm.dll` (2 delay-loaded exports): `GetJobA` and
+      `PlaySoundA`.
+  - Added broken PE forwarder detection and in-place redirection
+    (`IsBrokenForwarderTarget`) in `install_sta_shim.cpp` so existing
+    `shell32.dll` forwarder entries pointing to `windows.storage.dll.*` are
+    redirected to `nanoserver_sta_shim.<ExportName>` and verified by
+    `VerifyPatchedPe`.
+  - Added native regression check `VC10_mfc100u_gdiplus_and_shell32_load` in
+    `sta-shim/tests/native_regression.cpp` and installer regression checks
+    `R02_verified_PE32_shell32_exports`, `R02_optional_wow64_runtimes_copied`,
+    `R02_broken_forwarder_rejected_before_patch`, and
+    `R02_broken_forwarder_redirected_to_shim` in
+    `sta-shim/tests/installer_regression.cpp`.
+
+### Changed
+
+- Extended `install_sta_shim.exe` to patch `shell32.dll` in `System32` and
+  `SysWOW64` and remove `SHELL32` and `gdiplus` from `KnownDLLs`.
+- Removed duplicate per-flavour `nanoserver-*/sta-shim/` staging folders and
+  32-bit runtime DLLs from Git tracking (`nanoserver-*/sta-shim/` is now
+  ignored in `.gitignore` and populated on demand by `sta-shim/build_shim.ps1`
+  and each flavour's `go.ps1`).
+- Updated all six flavour `push.ps1` scripts and `README.md` tag examples to
+  container revision `1.5.0` (`-v1.5.0`, `-v1.5`, `-v1`).
+
 ## 1.4.0 - 2026-10-31
 
 ### Added

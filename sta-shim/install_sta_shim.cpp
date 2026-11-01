@@ -411,9 +411,11 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
     size_t addedCount = 0;
     for (const char* missingName : missingExports) {
         bool exists = false;
+        WORD existingOrdIdx = 0;
         for (const auto& entry : namedExports) {
             if (entry.Name == missingName) {
                 exists = true;
+                existingOrdIdx = entry.OrdinalIndex;
                 break;
             }
         }
@@ -426,6 +428,15 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
                 newOrdIdx,
                 std::string("nanoserver_sta_shim.") + missingName});
             ++addedCount;
+        } else {
+            const std::string shimTarget = std::string("nanoserver_sta_shim.") + missingName;
+            for (auto& fixup : forwarderFixups) {
+                if (fixup.OrdinalIndex == existingOrdIdx && fixup.Target != shimTarget) {
+                    fixup.Target = shimTarget;
+                    ++addedCount;
+                    break;
+                }
+            }
         }
     }
 
@@ -608,7 +619,7 @@ bool OpenKnownDlls(HKEY* key) {
 bool RemoveKnownDllEntries() {
     HKEY key = nullptr;
     if (!OpenKnownDlls(&key)) return false;
-    for (const wchar_t* name : {L"user32", L"ole32", L"gdi32"}) {
+    for (const wchar_t* name : {L"user32", L"ole32", L"gdi32", L"SHELL32", L"gdiplus"}) {
         LSTATUS status = RegDeleteValueW(key, name);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
             RegCloseKey(key);
@@ -647,7 +658,18 @@ const std::vector<const char*> kGdi32Exports = {
     "Escape", "GetBrushOrgEx", "GetNearestColor", "GetTextExtentPointA",
     "Pie", "PtInRegion", "ResetDCA", "RoundRect",
     "ScaleViewportExtEx", "ScaleWindowExtEx", "SetAbortProc", "SetBrushOrgEx",
-    "SetPixelV", "SetWindowOrgEx", "UnrealizeObject", "WidenPath"
+    "SetPixelV", "SetWindowOrgEx", "UnrealizeObject", "WidenPath",
+    "AbortPath", "AngleArc", "ArcTo", "Chord",
+    "CombineTransform", "CopyMetaFileW", "CreateEllipticRgn", "DrawEscape",
+    "EnumEnhMetaFile", "ExtFloodFill", "FlattenPath", "FrameRgn",
+    "GdiComment", "GetArcDirection", "GetBoundsRect", "GetDCDpiScaleValue",
+    "GetGraphicsMode", "GetMiterLimit", "GetPath", "GetPolyFillMode",
+    "GetStretchBltMode", "GetSystemPaletteUse", "IsValidEnhMetaRecordOffExt", "ModifyWorldTransform",
+    "OffsetClipRgn", "PlayEnhMetaFileRecord", "PlayMetaFileRecord", "PolyBezier",
+    "PolyDraw", "PolyPolygon", "PolyPolyline", "PolylineTo",
+    "PtVisible", "ResizePalette", "ScaleRgn", "SetArcDirection",
+    "SetBitmapBits", "SetColorAdjustment", "SetMapperFlags", "SetMiterLimit",
+    "SetPaletteEntries", "SetTextJustification"
 };
 const std::vector<const char*> kUser32Exports = {
     "CreateIcon", "GetKeyNameTextA", "GetClassInfoW", "GetClassInfoExW", "CallWindowProcW",
@@ -655,13 +677,16 @@ const std::vector<const char*> kUser32Exports = {
     "DdeCreateDataHandle", "DdeCreateStringHandleA", "DdeDisconnect", "DdeFreeDataHandle",
     "DdeFreeStringHandle", "DdeGetData", "DdeGetLastError", "DdeInitializeA",
     "DdeNameService", "DdePostAdvise", "DdeQueryConvInfo", "DdeQueryStringA",
-    "DdeSetUserHandle", "DdeUninitialize"
+    "DdeSetUserHandle", "DdeUninitialize", "MapVirtualKeyExA"
 };
 const std::vector<const char*> kOle32Exports = {
     "CoIsOle1Class", "OleConvertIStorageToOLESTREAM", "OleConvertOLESTREAMToIStorage",
     "OleCreateLink", "OleDoAutoConvert"
 };
 const std::vector<const char*> kComctl32Exports = {"ImageList_GetIconSize", "ImageList_SetIconSize"};
+const std::vector<const char*> kShell32Exports = {
+    "DragQueryFileW", "SHGetPathFromIDListW", "SHGetSpecialFolderLocation"
+};
 const std::vector<const char*> kNoExports;
 
 const std::vector<const char*>& RequiredExports(const std::wstring& name) {
@@ -669,6 +694,7 @@ const std::vector<const char*>& RequiredExports(const std::wstring& name) {
     if (name == L"gdi32.dll") return kGdi32Exports;
     if (name == L"ole32.dll") return kOle32Exports;
     if (name == L"comctl32.dll") return kComctl32Exports;
+    if (name == L"shell32.dll") return kShell32Exports;
     return kNoExports;
 }
 
@@ -713,6 +739,13 @@ bool VerifyPatchedPe(const wchar_t* path, const std::vector<const char*>& requir
             if (!ReadPeString(bytes, RvaToOffset(nt, nt->FileHeader.NumberOfSections, names[i]), name)) return false;
             if (name == required) {
                 if (ordinals[i] >= exports->NumberOfFunctions || functions[ordinals[i]] == 0) return false;
+                DWORD fnRva = functions[ordinals[i]];
+                const auto& expDir = directories[IMAGE_DIRECTORY_ENTRY_EXPORT];
+                if (fnRva >= expDir.VirtualAddress && fnRva < expDir.VirtualAddress + expDir.Size) {
+                    std::string target;
+                    if (!ReadPeString(bytes, RvaToOffset(nt, nt->FileHeader.NumberOfSections, fnRva), target)) return false;
+                    if (target != std::string("nanoserver_sta_shim.") + required) return false;
+                }
                 found = true;
                 break;
             }
@@ -735,7 +768,7 @@ bool PreflightPe(const std::wstring& path, WORD machine) {
 
 bool PreflightArchitecture(const std::wstring& payload, const std::wstring& systemDirectory, WORD machine) {
     if (!PreflightPe(payload, machine)) return false;
-    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll"}) {
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll"}) {
         if (!PreflightPe(systemDirectory + L"\\forwarders\\" + name, machine)) return false;
     }
     return true;
@@ -744,7 +777,7 @@ bool PreflightArchitecture(const std::wstring& payload, const std::wstring& syst
 bool InstallArchitecture(const std::wstring& payload, const std::wstring& systemDirectory) {
     if (!CopyRequiredFile(payload, systemDirectory + L"\\nanoserver_sta_shim.dll") ||
         !CopyRequiredFile(payload, systemDirectory + L"\\forwarders\\nanoserver_sta_shim.dll")) return false;
-    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll"}) {
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll"}) {
         std::wstring forwarder = systemDirectory + L"\\forwarders\\" + name;
         const auto& exports = RequiredExports(name);
         if (!PatchPeFileImports(forwarder.c_str()) || !PatchPeFileExports(forwarder.c_str(), exports) ||
@@ -758,6 +791,17 @@ bool InstallArchitecture(const std::wstring& payload, const std::wstring& system
     wprintf(L"[OK] Installed and verified shim in %s\n", systemDirectory.c_str());
     return true;
 }
+
+const wchar_t* const kOptionalWow64RuntimeDlls[] = {
+    L"msvbvm60.dll",
+    L"msvcr100.dll",
+    L"msvcp100.dll",
+    L"atl100.dll",
+    L"mfc100.dll",
+    L"mfc100u.dll",
+    L"msimg32.dll",
+    L"gdiplus.dll"
+};
 
 } // namespace
 
@@ -788,17 +832,26 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     std::wstring shim64 = baseDirectory + L"\\nanoserver_sta_shim_x64.dll";
     std::wstring shim86 = baseDirectory + L"\\nanoserver_sta_shim_x86.dll";
-    std::wstring vb6Runtime = baseDirectory + L"\\msvbvm60.dll";
     const std::wstring system32 = L"C:\\Windows\\System32";
     const std::wstring wow64 = L"C:\\Windows\\SysWOW64";
     DWORD wowAttributes = GetFileAttributesW((wow64 + L"\\forwarders").c_str());
     bool installWow64 = requireWow64 || (wowAttributes != INVALID_FILE_ATTRIBUTES && (wowAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
-    DWORD vb6Attributes = installWow64 ? GetFileAttributesW(vb6Runtime.c_str()) : INVALID_FILE_ATTRIBUTES;
-    bool hasVb6Runtime = installWow64 && vb6Attributes != INVALID_FILE_ATTRIBUTES && (vb6Attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    std::vector<const wchar_t*> presentWow64Runtimes;
+    if (installWow64) {
+        for (const wchar_t* runtimeDll : kOptionalWow64RuntimeDlls) {
+            std::wstring candidate = baseDirectory + L"\\" + runtimeDll;
+            DWORD attr = GetFileAttributesW(candidate.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                presentWow64Runtimes.push_back(runtimeDll);
+            }
+        }
+    }
     // Complete all architecture preflights before touching a system file or registry value.
     if (!PreflightArchitecture(shim64, system32, IMAGE_FILE_MACHINE_AMD64) ||
-        (installWow64 && !PreflightArchitecture(shim86, wow64, IMAGE_FILE_MACHINE_I386)) ||
-        (hasVb6Runtime && !PreflightPe(vb6Runtime, IMAGE_FILE_MACHINE_I386))) return 1;
+        (installWow64 && !PreflightArchitecture(shim86, wow64, IMAGE_FILE_MACHINE_I386))) return 1;
+    for (const wchar_t* runtimeDll : presentWow64Runtimes) {
+        if (!PreflightPe(baseDirectory + L"\\" + runtimeDll, IMAGE_FILE_MACHINE_I386)) return 1;
+    }
     if (!EnablePrivilege(L"SeBackupPrivilege") || !EnablePrivilege(L"SeRestorePrivilege")) {
         fwprintf(stderr, L"[ERR] Cannot enable installer privileges (err=%lu).\n", GetLastError());
         return 1;
@@ -810,8 +863,10 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     if (RegCloseKey(key) != ERROR_SUCCESS) return 1;
     if (!InstallArchitecture(shim64, system32) ||
-        (installWow64 && !InstallArchitecture(shim86, wow64)) ||
-        (hasVb6Runtime && !CopyRequiredFile(vb6Runtime, wow64 + L"\\msvbvm60.dll"))) return 1;
+        (installWow64 && !InstallArchitecture(shim86, wow64))) return 1;
+    for (const wchar_t* runtimeDll : presentWow64Runtimes) {
+        if (!CopyRequiredFile(baseDirectory + L"\\" + runtimeDll, wow64 + L"\\" + runtimeDll)) return 1;
+    }
     if (!installWow64) wprintf(L"[OK] WOW64 not requested or present; installing x64 only.\n");
     if (!RemoveKnownDllEntries()) {
         fwprintf(stderr, L"[ERR] Cannot update KnownDLLs (err=%lu).\n", GetLastError());

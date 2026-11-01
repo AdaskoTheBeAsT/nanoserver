@@ -15,6 +15,17 @@ RUN DISM /Online /Enable-Feature /All /FeatureName:IIS-WebServerRole /FeatureNam
     && reg export "HKLM\SOFTWARE\WOW6432Node\Microsoft\ASP.NET" C:\reg\aspnet32.reg /y `
     && reg export "HKLM\SYSTEM\CurrentControlSet\Services\ASP.NET_4.0.30319" C:\reg\aspnetsvc.reg /y
 
+# Download and extract 32-bit WoW64 runtime DLLs (VC++ 2010 SP1 KB2565063, VB6 6.00.9848, and Server Core GDI+/MSIMG32)
+RUN mkdir C:\wow64_runtimes `
+    && curl.exe --fail --location --output C:\wow64_runtimes\msvbvm60.dll `
+        https://msdl.microsoft.com/download/symbols/msvbvm60.dll/5EA8E7BC15d000/msvbvm60.dll `
+    && curl.exe --fail --location --output C:\vcredist_x86.exe `
+        https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe `
+    && start /wait C:\vcredist_x86.exe /q /norestart `
+    && del C:\vcredist_x86.exe `
+    && (for %F in (msvcr100.dll msvcp100.dll atl100.dll mfc100.dll mfc100u.dll msimg32.dll) do copy /Y "C:\Windows\SysWOW64\%F" "C:\wow64_runtimes\%F" >nul) `
+    && (for /D %G in ("C:\Windows\WinSxS\x86_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.*") do copy /Y "%G\GdiPlus.dll" "C:\wow64_runtimes\gdiplus.dll" >nul)
+
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
 
 SHELL ["cmd", "/S", "/C"]
@@ -26,12 +37,15 @@ COPY install_features.cmd C:\install\install_features.cmd
 
 RUN C:\install\install_features.cmd
 
-# Complete post-reboot CBS servicing (ResolvePendingTransactions) while Winmgmt is running
+# Complete post-reboot CBS servicing (ResolvePendingTransactions) while Winmgmt is running,
+# then stop IIS services (WAS/W3SVC/AppHostSvc) before moving schema/en-US out of the way for Server Core COPY.
 RUN DISM /Online /Get-Capabilities >nul `
-    && (net stop TrustedInstaller >nul 2>&1 & del /F /Q C:\Windows\Logs\CBS\*.log C:\Windows\Logs\DISM\*.log >nul 2>&1) `
+    && (net stop TrustedInstaller >nul 2>&1 & net stop was /y >nul 2>&1 & net stop apphostsvc /y >nul 2>&1 & del /F /Q C:\Windows\Logs\CBS\*.log C:\Windows\Logs\DISM\*.log >nul 2>&1) `
     && (if exist C:\Windows\WinSxS\pending.xml (echo CBS pending.xml still present && exit /b 1)) `
     && (if exist C:\Windows\SysWOW64\ntdll.dll (echo WOW64 installed) else (echo WOW64 missing && exit /b 1)) `
-    && (if exist C:\Windows\System32\inetsrv\appcmd.exe (echo IIS installed) else (echo IIS/appcmd missing && exit /b 1))
+    && (if exist C:\Windows\System32\inetsrv\appcmd.exe (echo IIS installed) else (echo IIS/appcmd missing && exit /b 1)) `
+    && move C:\Windows\System32\inetsrv\config\schema C:\Windows\Temp\iis_schema_old >nul `
+    && move C:\Windows\System32\inetsrv\en-US C:\Windows\Temp\iis_enus_old >nul
 
 # Copy .NET Framework 4.8.1 (x86 + x64 + GAC), CLR CRT libraries, and 32-bit/64-bit IIS ASP.NET binaries
 # while keeping Nano Server's native C:\Windows\SysWOW64\forwarders and System32\forwarders intact.
@@ -39,8 +53,6 @@ COPY --from=installer ["C:/Windows/Microsoft.NET/", "C:/Windows/Microsoft.NET/"]
 COPY --from=installer ["C:/Windows/SysWOW64/mscoree.dll", "C:/Windows/SysWOW64/ucrtbase_clr0400.dll", "C:/Windows/SysWOW64/vcruntime140_clr0400.dll", "C:/Windows/SysWOW64/"]
 COPY --from=installer ["C:/Windows/System32/mscoree.dll", "C:/Windows/System32/ucrtbase_clr0400.dll", "C:/Windows/System32/vcruntime140_clr0400.dll", "C:/Windows/System32/vcruntime140_1_clr0400.dll", "C:/Windows/System32/"]
 COPY --from=installer ["C:/Windows/SysWOW64/inetsrv/", "C:/Windows/SysWOW64/inetsrv/"]
-RUN move C:\Windows\System32\inetsrv\config\schema C:\Windows\Temp\iis_schema_old >nul `
-    && move C:\Windows\System32\inetsrv\en-US C:\Windows\Temp\iis_enus_old >nul
 COPY --from=installer ["C:/Windows/System32/inetsrv/", "C:/Windows/System32/inetsrv/"]
 COPY --from=installer ["C:/reg/", "C:/install/reg/"]
 
@@ -66,6 +78,7 @@ RUN reg import C:\install\reg\ndp64.reg `
 
 # Install OS-level user-mode STA & window/message-queue shim for COM Single-Threaded Apartments (STA)
 COPY sta-shim C:\install\sta-shim
+COPY --from=installer ["C:/wow64_runtimes/", "C:/install/sta-shim/"]
 RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim --require-wow64 `
     && copy /Y C:\install\sta-shim\iis_service_monitor.exe C:\iis_service_monitor.exe `
     && rmdir /S /Q C:\install\sta-shim

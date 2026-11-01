@@ -2873,6 +2873,378 @@ extern "C" BOOL WINAPI Shim_UnrealizeObject(HGDIOBJ h) {
     return TRUE;
 }
 
+extern "C" BOOL WINAPI Shim_AbortPath(HDC hdc) {
+    (void)hdc;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_AngleArc(HDC hdc, int x, int y, DWORD r, FLOAT StartAngle, FLOAT SweepAngle) {
+    (void)hdc;
+    (void)x;
+    (void)y;
+    (void)r;
+    (void)StartAngle;
+    (void)SweepAngle;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_ArcTo(HDC hdc, int left, int top, int right, int bottom, int xr1, int yr1, int xr2, int yr2) {
+    (void)hdc;
+    (void)left;
+    (void)top;
+    (void)right;
+    (void)bottom;
+    (void)xr1;
+    (void)yr1;
+    (void)xr2;
+    (void)yr2;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_Chord(HDC hdc, int x1, int y1, int x2, int y2, int x3, int y3, int x4, int y4) {
+    (void)hdc;
+    (void)x1;
+    (void)y1;
+    (void)x2;
+    (void)y2;
+    (void)x3;
+    (void)y3;
+    (void)x4;
+    (void)y4;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_CombineTransform(LPXFORM lpxfOut, const XFORM* lpxf1, const XFORM* lpxf2) {
+    (void)lpxf2;
+    if (!lpxfOut) return FALSE;
+    if (lpxf1) {
+        *lpxfOut = *lpxf1;
+    } else {
+        lpxfOut->eM11 = 1.0f;
+        lpxfOut->eM12 = 0.0f;
+        lpxfOut->eM21 = 0.0f;
+        lpxfOut->eM22 = 1.0f;
+        lpxfOut->eDx = 0.0f;
+        lpxfOut->eDy = 0.0f;
+    }
+    return TRUE;
+}
+
+extern "C" HMETAFILE WINAPI Shim_CopyMetaFileW(HMETAFILE hmf, LPCWSTR lpsz) {
+    (void)hmf;
+    (void)lpsz;
+    return reinterpret_cast<HMETAFILE>(static_cast<ULONG_PTR>(0x53484D03u));
+}
+
+extern "C" HRGN WINAPI Shim_CreateEllipticRgn(int x1, int y1, int x2, int y2) {
+    (void)x1;
+    (void)y1;
+    (void)x2;
+    (void)y2;
+    return reinterpret_cast<HRGN>(static_cast<ULONG_PTR>(0x53485201u));
+}
+
+extern "C" int WINAPI Shim_DrawEscape(HDC hdc, int iEscape, int cjIn, LPCSTR lpIn) {
+    (void)hdc;
+    (void)iEscape;
+    (void)cjIn;
+    (void)lpIn;
+    return 0;
+}
+
+extern "C" BOOL WINAPI Shim_EnumEnhMetaFile(HDC hdc, HENHMETAFILE hmf, ENHMFENUMPROC proc, LPVOID param, const RECT* lpRect) {
+    (void)hdc;
+    (void)hmf;
+    (void)proc;
+    (void)param;
+    (void)lpRect;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_ExtFloodFill(HDC hdc, int x, int y, COLORREF color, UINT type) {
+    (void)hdc;
+    (void)x;
+    (void)y;
+    (void)color;
+    (void)type;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_FlattenPath(HDC hdc) {
+    (void)hdc;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_FrameRgn(HDC hdc, HRGN hrgn, HBRUSH hbr, int w, int h) {
+    (void)hdc;
+    (void)hrgn;
+    (void)hbr;
+    (void)w;
+    (void)h;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_GdiComment(HDC hdc, UINT nSize, const BYTE* lpData) {
+    (void)hdc;
+    (void)nSize;
+    (void)lpData;
+    return TRUE;
+}
+
+extern "C" int WINAPI Shim_GetArcDirection(HDC hdc) {
+    (void)hdc;
+    return AD_COUNTERCLOCKWISE;
+}
+
+extern "C" UINT WINAPI Shim_GetBoundsRect(HDC hdc, LPRECT lprcBounds, UINT flags) {
+    (void)hdc;
+    (void)flags;
+    if (lprcBounds) {
+        lprcBounds->left = 0;
+        lprcBounds->top = 0;
+        lprcBounds->right = 0;
+        lprcBounds->bottom = 0;
+    }
+    return DCB_RESET;
+}
+
+extern "C" int WINAPI Shim_GetDCDpiScaleValue(HDC hdc) {
+    (void)hdc;
+    return 1;
+}
+
+extern "C" int WINAPI Shim_GetGraphicsMode(HDC hdc) {
+    (void)hdc;
+    return GM_COMPATIBLE;
+}
+
+extern "C" BOOL WINAPI Shim_GetMiterLimit(HDC hdc, PFLOAT peLimit) {
+    (void)hdc;
+    if (!peLimit) return FALSE;
+    *peLimit = 10.0f;
+    return TRUE;
+}
+
+extern "C" int WINAPI Shim_GetPath(HDC hdc, LPPOINT apt, LPBYTE aj, int cpt) {
+    (void)hdc;
+    (void)apt;
+    (void)aj;
+    (void)cpt;
+    return 0;
+}
+
+extern "C" int WINAPI Shim_GetPolyFillMode(HDC hdc) {
+    (void)hdc;
+    return ALTERNATE;
+}
+
+extern "C" int WINAPI Shim_GetStretchBltMode(HDC hdc) {
+    (void)hdc;
+    return BLACKONWHITE;
+}
+
+extern "C" UINT WINAPI Shim_GetSystemPaletteUse(HDC hdc) {
+    (void)hdc;
+    return SYSPAL_STATIC;
+}
+
+extern "C" BOOL WINAPI Shim_IsValidEnhMetaRecordOffExt(LPVOID p1, LPVOID p2, DWORD p3, DWORD p4) {
+    (void)p1;
+    (void)p2;
+    (void)p3;
+    (void)p4;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_ModifyWorldTransform(HDC hdc, const XFORM* lpxf, DWORD mode) {
+    (void)hdc;
+    (void)lpxf;
+    (void)mode;
+    return TRUE;
+}
+
+extern "C" int WINAPI Shim_OffsetClipRgn(HDC hdc, int x, int y) {
+    (void)hdc;
+    (void)x;
+    (void)y;
+    return SIMPLEREGION;
+}
+
+extern "C" BOOL WINAPI Shim_PlayEnhMetaFileRecord(HDC hdc, LPHANDLETABLE pht, const ENHMETARECORD* pmr, UINT cht) {
+    (void)hdc;
+    (void)pht;
+    (void)pmr;
+    (void)cht;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_PlayMetaFileRecord(HDC hdc, LPHANDLETABLE lpHandleTable, LPMETARECORD lpMR, UINT noObjs) {
+    (void)hdc;
+    (void)lpHandleTable;
+    (void)lpMR;
+    (void)noObjs;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_PolyBezier(HDC hdc, const POINT* apt, DWORD cpt) {
+    (void)hdc;
+    (void)apt;
+    (void)cpt;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_PolyDraw(HDC hdc, const POINT* apt, const BYTE* aj, int cpt) {
+    (void)hdc;
+    (void)apt;
+    (void)aj;
+    (void)cpt;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_PolyPolygon(HDC hdc, const POINT* apt, const INT* asz, int csz) {
+    (void)hdc;
+    (void)apt;
+    (void)asz;
+    (void)csz;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_PolyPolyline(HDC hdc, const POINT* apt, const DWORD* asz, DWORD csz) {
+    (void)hdc;
+    (void)apt;
+    (void)asz;
+    (void)csz;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_PolylineTo(HDC hdc, const POINT* apt, DWORD cpt) {
+    (void)hdc;
+    (void)apt;
+    (void)cpt;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_PtVisible(HDC hdc, int x, int y) {
+    (void)hdc;
+    (void)x;
+    (void)y;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_ResizePalette(HPALETTE hpal, UINT n) {
+    (void)hpal;
+    (void)n;
+    return TRUE;
+}
+
+extern "C" int WINAPI Shim_ScaleRgn(HDC hdc, HRGN hrgn) {
+    (void)hdc;
+    (void)hrgn;
+    return SIMPLEREGION;
+}
+
+extern "C" int WINAPI Shim_SetArcDirection(HDC hdc, int dir) {
+    (void)hdc;
+    (void)dir;
+    return AD_COUNTERCLOCKWISE;
+}
+
+extern "C" LONG WINAPI Shim_SetBitmapBits(HBITMAP hbm, DWORD cb, const VOID* pvBits) {
+    (void)hbm;
+    (void)pvBits;
+    return static_cast<LONG>(cb);
+}
+
+extern "C" BOOL WINAPI Shim_SetColorAdjustment(HDC hdc, const COLORADJUSTMENT* lpca) {
+    (void)hdc;
+    (void)lpca;
+    return TRUE;
+}
+
+extern "C" DWORD WINAPI Shim_SetMapperFlags(HDC hdc, DWORD flags) {
+    (void)hdc;
+    (void)flags;
+    return 0;
+}
+
+extern "C" BOOL WINAPI Shim_SetMiterLimit(HDC hdc, FLOAT limit, PFLOAT old) {
+    (void)hdc;
+    (void)limit;
+    if (old) *old = 10.0f;
+    return TRUE;
+}
+
+extern "C" UINT WINAPI Shim_SetPaletteEntries(HPALETTE hpal, UINT iStart, UINT cEntries, const PALETTEENTRY* pPalEntries) {
+    (void)hpal;
+    (void)iStart;
+    (void)pPalEntries;
+    return cEntries;
+}
+
+extern "C" BOOL WINAPI Shim_SetTextJustification(HDC hdc, int extra, int count) {
+    (void)hdc;
+    (void)extra;
+    (void)count;
+    return TRUE;
+}
+
+extern "C" UINT WINAPI Shim_MapVirtualKeyExA(UINT uCode, UINT uMapType, HKL dwhkl) {
+    (void)uCode;
+    (void)uMapType;
+    (void)dwhkl;
+    return 0;
+}
+
+extern "C" UINT WINAPI Shim_DragQueryFileW(PVOID hDrop, UINT iFile, LPWSTR lpszFile, UINT cch) {
+    (void)hDrop;
+    (void)iFile;
+    if (lpszFile && cch > 0) {
+        lpszFile[0] = L'\0';
+    }
+    return 0;
+}
+
+extern "C" BOOL WINAPI Shim_SHGetPathFromIDListW(LPCVOID pidl, LPWSTR pszPath) {
+    if (!pszPath) return FALSE;
+    if (!pidl) {
+        pszPath[0] = L'\0';
+        return FALSE;
+    }
+    DWORD len = GetTempPathW(MAX_PATH, pszPath);
+    if (len == 0 || len >= MAX_PATH) {
+        pszPath[0] = L'C';
+        pszPath[1] = L':';
+        pszPath[2] = L'\\';
+        pszPath[3] = L'\0';
+    }
+    return TRUE;
+}
+
+extern "C" HRESULT WINAPI Shim_SHGetSpecialFolderLocation(HWND hwnd, int csidl, PVOID* ppidl) {
+    (void)hwnd;
+    (void)csidl;
+    if (!ppidl) return E_INVALIDARG;
+    *ppidl = nullptr;
+    return E_NOTIMPL;
+}
+
+extern "C" BOOL WINAPI Shim_GetJobA(HANDLE hPrinter, DWORD JobId, DWORD Level, LPBYTE pJob, DWORD cbBuf, LPDWORD pcbNeeded) {
+    (void)hPrinter;
+    (void)JobId;
+    (void)Level;
+    (void)pJob;
+    (void)cbBuf;
+    if (pcbNeeded) *pcbNeeded = 0;
+    return FALSE;
+}
+
+extern "C" BOOL WINAPI Shim_PlaySoundA(LPCSTR pszSound, HMODULE hmod, DWORD fdwSound) {
+    (void)pszSound;
+    (void)hmod;
+    (void)fdwSound;
+    return TRUE;
+}
+
 extern "C" BOOL WINAPI Shim_CoIsOle1Class(REFCLSID rclsid) {
     (void)rclsid;
     return FALSE;
@@ -3261,6 +3633,54 @@ const ExportMapping kExportTable[] = {
     {"SetWindowOrgEx", reinterpret_cast<PVOID>(Shim_SetWindowOrgEx)},
     {"UnrealizeObject", reinterpret_cast<PVOID>(Shim_UnrealizeObject)},
     {"WidenPath", reinterpret_cast<PVOID>(Shim_WidenPath)},
+    {"AbortPath", reinterpret_cast<PVOID>(Shim_AbortPath)},
+    {"AngleArc", reinterpret_cast<PVOID>(Shim_AngleArc)},
+    {"ArcTo", reinterpret_cast<PVOID>(Shim_ArcTo)},
+    {"Chord", reinterpret_cast<PVOID>(Shim_Chord)},
+    {"CombineTransform", reinterpret_cast<PVOID>(Shim_CombineTransform)},
+    {"CopyMetaFileW", reinterpret_cast<PVOID>(Shim_CopyMetaFileW)},
+    {"CreateEllipticRgn", reinterpret_cast<PVOID>(Shim_CreateEllipticRgn)},
+    {"DrawEscape", reinterpret_cast<PVOID>(Shim_DrawEscape)},
+    {"EnumEnhMetaFile", reinterpret_cast<PVOID>(Shim_EnumEnhMetaFile)},
+    {"ExtFloodFill", reinterpret_cast<PVOID>(Shim_ExtFloodFill)},
+    {"FlattenPath", reinterpret_cast<PVOID>(Shim_FlattenPath)},
+    {"FrameRgn", reinterpret_cast<PVOID>(Shim_FrameRgn)},
+    {"GdiComment", reinterpret_cast<PVOID>(Shim_GdiComment)},
+    {"GetArcDirection", reinterpret_cast<PVOID>(Shim_GetArcDirection)},
+    {"GetBoundsRect", reinterpret_cast<PVOID>(Shim_GetBoundsRect)},
+    {"GetDCDpiScaleValue", reinterpret_cast<PVOID>(Shim_GetDCDpiScaleValue)},
+    {"GetGraphicsMode", reinterpret_cast<PVOID>(Shim_GetGraphicsMode)},
+    {"GetMiterLimit", reinterpret_cast<PVOID>(Shim_GetMiterLimit)},
+    {"GetPath", reinterpret_cast<PVOID>(Shim_GetPath)},
+    {"GetPolyFillMode", reinterpret_cast<PVOID>(Shim_GetPolyFillMode)},
+    {"GetStretchBltMode", reinterpret_cast<PVOID>(Shim_GetStretchBltMode)},
+    {"GetSystemPaletteUse", reinterpret_cast<PVOID>(Shim_GetSystemPaletteUse)},
+    {"IsValidEnhMetaRecordOffExt", reinterpret_cast<PVOID>(Shim_IsValidEnhMetaRecordOffExt)},
+    {"ModifyWorldTransform", reinterpret_cast<PVOID>(Shim_ModifyWorldTransform)},
+    {"OffsetClipRgn", reinterpret_cast<PVOID>(Shim_OffsetClipRgn)},
+    {"PlayEnhMetaFileRecord", reinterpret_cast<PVOID>(Shim_PlayEnhMetaFileRecord)},
+    {"PlayMetaFileRecord", reinterpret_cast<PVOID>(Shim_PlayMetaFileRecord)},
+    {"PolyBezier", reinterpret_cast<PVOID>(Shim_PolyBezier)},
+    {"PolyDraw", reinterpret_cast<PVOID>(Shim_PolyDraw)},
+    {"PolyPolygon", reinterpret_cast<PVOID>(Shim_PolyPolygon)},
+    {"PolyPolyline", reinterpret_cast<PVOID>(Shim_PolyPolyline)},
+    {"PolylineTo", reinterpret_cast<PVOID>(Shim_PolylineTo)},
+    {"PtVisible", reinterpret_cast<PVOID>(Shim_PtVisible)},
+    {"ResizePalette", reinterpret_cast<PVOID>(Shim_ResizePalette)},
+    {"ScaleRgn", reinterpret_cast<PVOID>(Shim_ScaleRgn)},
+    {"SetArcDirection", reinterpret_cast<PVOID>(Shim_SetArcDirection)},
+    {"SetBitmapBits", reinterpret_cast<PVOID>(Shim_SetBitmapBits)},
+    {"SetColorAdjustment", reinterpret_cast<PVOID>(Shim_SetColorAdjustment)},
+    {"SetMapperFlags", reinterpret_cast<PVOID>(Shim_SetMapperFlags)},
+    {"SetMiterLimit", reinterpret_cast<PVOID>(Shim_SetMiterLimit)},
+    {"SetPaletteEntries", reinterpret_cast<PVOID>(Shim_SetPaletteEntries)},
+    {"SetTextJustification", reinterpret_cast<PVOID>(Shim_SetTextJustification)},
+    {"MapVirtualKeyExA", reinterpret_cast<PVOID>(Shim_MapVirtualKeyExA)},
+    {"DragQueryFileW", reinterpret_cast<PVOID>(Shim_DragQueryFileW)},
+    {"SHGetPathFromIDListW", reinterpret_cast<PVOID>(Shim_SHGetPathFromIDListW)},
+    {"SHGetSpecialFolderLocation", reinterpret_cast<PVOID>(Shim_SHGetSpecialFolderLocation)},
+    {"GetJobA", reinterpret_cast<PVOID>(Shim_GetJobA)},
+    {"PlaySoundA", reinterpret_cast<PVOID>(Shim_PlaySoundA)},
     {"CoIsOle1Class", reinterpret_cast<PVOID>(Shim_CoIsOle1Class)},
     {"OleConvertIStorageToOLESTREAM", reinterpret_cast<PVOID>(Shim_OleConvertIStorageToOLESTREAM)},
     {"OleConvertOLESTREAMToIStorage", reinterpret_cast<PVOID>(Shim_OleConvertOLESTREAMToIStorage)},

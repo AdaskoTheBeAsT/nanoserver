@@ -1,4 +1,19 @@
 # escape=`
+FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer
+
+SHELL ["cmd", "/S", "/C"]
+
+# Download and extract 32-bit WoW64 runtime DLLs (VC++ 2010 SP1 KB2565063, VB6 6.00.9848, and Server Core GDI+/MSIMG32)
+RUN mkdir C:\wow64_runtimes `
+    && curl.exe --fail --location --output C:\wow64_runtimes\msvbvm60.dll `
+        https://msdl.microsoft.com/download/symbols/msvbvm60.dll/5EA8E7BC15d000/msvbvm60.dll `
+    && curl.exe --fail --location --output C:\vcredist_x86.exe `
+        https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe `
+    && start /wait C:\vcredist_x86.exe /q /norestart `
+    && del C:\vcredist_x86.exe `
+    && (for %F in (msvcr100.dll msvcp100.dll atl100.dll mfc100.dll mfc100u.dll msimg32.dll) do copy /Y "C:\Windows\SysWOW64\%F" "C:\wow64_runtimes\%F" >nul) `
+    && (for /D %G in ("C:\Windows\WinSxS\x86_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.*") do copy /Y "%G\GdiPlus.dll" "C:\wow64_runtimes\gdiplus.dll" >nul)
+
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
 
 ARG DOTNET_VERSION=10.0.14
@@ -36,6 +51,7 @@ RUN mkdir "C:\Program Files (x86)\dotnet" `
 
 # Install OS-level user-mode STA & window/message-queue shim for COM Single-Threaded Apartments (STA)
 COPY sta-shim C:\install\sta-shim
+COPY --from=installer ["C:/wow64_runtimes/", "C:/install/sta-shim/"]
 RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim --require-wow64 `
     && rmdir /S /Q C:\install\sta-shim
 
