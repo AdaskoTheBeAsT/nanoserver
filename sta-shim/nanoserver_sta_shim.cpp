@@ -1513,6 +1513,167 @@ extern "C" HANDLE WINAPI Shim_CopyEnhMetaFileA(HANDLE hemfSrc, LPCSTR lpszFile) 
     return hemfSrc ? hemfSrc : reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484D01u));
 }
 
+extern "C" HANDLE WINAPI Shim_CopyEnhMetaFileW(HANDLE hemfSrc, LPCWSTR lpszFile) {
+    (void)lpszFile;
+    return hemfSrc ? hemfSrc : reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484D01u));
+}
+
+extern "C" UINT WINAPI Shim_GetEnhMetaFileDescriptionA(HANDLE hemf, UINT cchBuffer, LPSTR lpDescription) {
+    (void)hemf;
+    if (lpDescription && cchBuffer > 0) {
+        lpDescription[0] = '\0';
+    }
+    return 0;
+}
+
+extern "C" UINT WINAPI Shim_GetEnhMetaFileDescriptionW(HANDLE hemf, UINT cchBuffer, LPWSTR lpDescription) {
+    (void)hemf;
+    if (lpDescription && cchBuffer > 0) {
+        lpDescription[0] = L'\0';
+    }
+    return 0;
+}
+
+extern "C" int WINAPI Shim_GetTextCharacterExtra(HDC hdc) {
+    (void)hdc;
+    return 0;
+}
+
+extern "C" HCURSOR WINAPI Shim_LoadCursorFromFileA(LPCSTR lpFileName) {
+    (void)lpFileName;
+    return reinterpret_cast<HCURSOR>(static_cast<ULONG_PTR>(0x53484301u));
+}
+
+extern "C" HCURSOR WINAPI Shim_LoadCursorFromFileW(LPCWSTR lpFileName) {
+    (void)lpFileName;
+    return reinterpret_cast<HCURSOR>(static_cast<ULONG_PTR>(0x53484301u));
+}
+
+extern "C" BOOL WINAPI Shim_SetGestureConfig(HWND hwnd, DWORD dwReserved, UINT cIDs, PVOID pGestureConfig, UINT cbSize) {
+    (void)hwnd;
+    (void)dwReserved;
+    (void)cIDs;
+    (void)pGestureConfig;
+    (void)cbSize;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_IsEqualGUID(const GUID* rguid1, const GUID* rguid2) {
+    if (!rguid1 || !rguid2) {
+        return rguid1 == rguid2 ? TRUE : FALSE;
+    }
+    return memcmp(rguid1, rguid2, sizeof(GUID)) == 0 ? TRUE : FALSE;
+}
+
+extern "C" BOOL WINAPI Shim_InitializeFlatSB(HWND hwnd) {
+    (void)hwnd;
+    return TRUE;
+}
+
+extern "C" HRESULT WINAPI Shim_UninitializeFlatSB(HWND hwnd) {
+    (void)hwnd;
+    return S_OK;
+}
+
+extern "C" BOOL WINAPI Shim_FlatSB_EnableScrollBar(HWND hwnd, int wSBflags, UINT wArrows) {
+    (void)hwnd;
+    (void)wSBflags;
+    (void)wArrows;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_FlatSB_ShowScrollBar(HWND hwnd, int code, BOOL fShow) {
+    (void)hwnd;
+    (void)code;
+    (void)fShow;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_FlatSB_GetScrollRange(HWND hwnd, int code, LPINT lpMinPos, LPINT lpMaxPos) {
+    (void)hwnd;
+    (void)code;
+    if (lpMinPos) {
+        *lpMinPos = 0;
+    }
+    if (lpMaxPos) {
+        *lpMaxPos = 100;
+    }
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_FlatSB_GetScrollInfo(HWND hwnd, int fnBar, LPSCROLLINFO lpsi) {
+    (void)hwnd;
+    (void)fnBar;
+    if (!lpsi) {
+        return FALSE;
+    }
+    lpsi->nMin = 0;
+    lpsi->nMax = 100;
+    lpsi->nPage = 10;
+    lpsi->nPos = 0;
+    lpsi->nTrackPos = 0;
+    return TRUE;
+}
+
+extern "C" int WINAPI Shim_FlatSB_GetScrollPos(HWND hwnd, int code) {
+    (void)hwnd;
+    (void)code;
+    return 0;
+}
+
+extern "C" BOOL WINAPI Shim_FlatSB_GetScrollProp(HWND hwnd, int propIndex, LPINT pValue) {
+    (void)hwnd;
+    (void)propIndex;
+    if (pValue) {
+        *pValue = 0;
+    }
+    return TRUE;
+}
+
+extern "C" int WINAPI Shim_FlatSB_SetScrollPos(HWND hwnd, int code, int pos, BOOL fRedraw) {
+    (void)hwnd;
+    (void)code;
+    (void)pos;
+    (void)fRedraw;
+    return 0;
+}
+
+extern "C" int WINAPI Shim_FlatSB_SetScrollInfo(HWND hwnd, int fnBar, LPCSCROLLINFO lpsi, BOOL fRedraw) {
+    (void)hwnd;
+    (void)fnBar;
+    (void)fRedraw;
+    return lpsi ? lpsi->nPos : 0;
+}
+
+extern "C" int WINAPI Shim_FlatSB_SetScrollRange(HWND hwnd, int code, int min, int max, BOOL fRedraw) {
+    (void)hwnd;
+    (void)code;
+    (void)min;
+    (void)max;
+    (void)fRedraw;
+    return 0;
+}
+
+extern "C" BOOL WINAPI Shim_FlatSB_SetScrollProp(HWND hwnd, UINT index, INT_PTR newValue, BOOL fRedraw) {
+    (void)hwnd;
+    (void)index;
+    (void)newValue;
+    (void)fRedraw;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_sndPlaySoundA(LPCSTR pszSound, UINT fuSound) {
+    (void)pszSound;
+    (void)fuSound;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_sndPlaySoundW(LPCWSTR pszSound, UINT fuSound) {
+    (void)pszSound;
+    (void)fuSound;
+    return TRUE;
+}
+
 extern "C" HANDLE WINAPI Shim_CreatePenIndirect(const void* plpen) {
     (void)plpen;
     return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x53484D02u));
@@ -2010,6 +2171,117 @@ int WINAPI Shim_GetSystemMetrics(int index) {
         case 80: /* SM_CMONITORS */     return 1;
         default:                        return 0;
     }
+}
+
+extern "C" int WINAPI Shim_GetSystemMetricsForDpi(int index, UINT dpi) {
+    (void)dpi;
+    return Shim_GetSystemMetrics(index);
+}
+
+extern "C" BOOL WINAPI Shim_EnumDisplayMonitors(
+    HDC hdc,
+    LPCRECT lprcClip,
+    MONITORENUMPROC lpfnEnum,
+    LPARAM dwData) {
+    if (!lpfnEnum) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    const HMONITOR hMonitor = reinterpret_cast<HMONITOR>(static_cast<ULONG_PTR>(0x00010001u));
+    RECT rcMonitor = {0, 0, 1024, 768};
+    if (lprcClip) {
+        LONG left = (std::max)(rcMonitor.left, lprcClip->left);
+        LONG top = (std::max)(rcMonitor.top, lprcClip->top);
+        LONG right = (std::min)(rcMonitor.right, lprcClip->right);
+        LONG bottom = (std::min)(rcMonitor.bottom, lprcClip->bottom);
+        if (left < right && top < bottom) {
+            rcMonitor = {left, top, right, bottom};
+        }
+    }
+    lpfnEnum(hMonitor, hdc, &rcMonitor, dwData);
+    return TRUE;
+}
+
+extern "C" HMONITOR WINAPI Shim_MonitorFromPoint(POINT pt, DWORD dwFlags) {
+    (void)pt;
+    (void)dwFlags;
+    return reinterpret_cast<HMONITOR>(static_cast<ULONG_PTR>(0x00010001u));
+}
+
+extern "C" HMONITOR WINAPI Shim_MonitorFromRect(LPCRECT lprc, DWORD dwFlags) {
+    (void)lprc;
+    (void)dwFlags;
+    return reinterpret_cast<HMONITOR>(static_cast<ULONG_PTR>(0x00010001u));
+}
+
+extern "C" HMONITOR WINAPI Shim_MonitorFromWindow(HWND hwnd, DWORD dwFlags) {
+    (void)hwnd;
+    (void)dwFlags;
+    return reinterpret_cast<HMONITOR>(static_cast<ULONG_PTR>(0x00010001u));
+}
+
+extern "C" BOOL WINAPI Shim_GetMonitorInfoW(HMONITOR hMonitor, LPMONITORINFO lpmi) {
+    (void)hMonitor;
+    if (!lpmi || lpmi->cbSize < sizeof(MONITORINFO)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    lpmi->rcMonitor = {0, 0, 1024, 768};
+    lpmi->rcWork = {0, 0, 1024, 746};
+    lpmi->dwFlags = MONITORINFOF_PRIMARY;
+    if (lpmi->cbSize >= sizeof(MONITORINFOEXW)) {
+        auto* ex = reinterpret_cast<MONITORINFOEXW*>(lpmi);
+        wcscpy_s(ex->szDevice, L"\\\\.\\DISPLAY1");
+    }
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_GetMonitorInfoA(HMONITOR hMonitor, LPMONITORINFO lpmi) {
+    (void)hMonitor;
+    if (!lpmi || lpmi->cbSize < sizeof(MONITORINFO)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    lpmi->rcMonitor = {0, 0, 1024, 768};
+    lpmi->rcWork = {0, 0, 1024, 746};
+    lpmi->dwFlags = MONITORINFOF_PRIMARY;
+    if (lpmi->cbSize >= sizeof(MONITORINFOEXA)) {
+        auto* ex = reinterpret_cast<MONITORINFOEXA*>(lpmi);
+        strcpy_s(ex->szDevice, "\\\\.\\DISPLAY1");
+    }
+    return TRUE;
+}
+
+extern "C" HRESULT WINAPI Shim_GetDpiForMonitor(HMONITOR hmonitor, int dpiType, UINT* dpiX, UINT* dpiY) {
+    (void)hmonitor;
+    (void)dpiType;
+    if (!dpiX || !dpiY) {
+        return E_INVALIDARG;
+    }
+    *dpiX = 96;
+    *dpiY = 96;
+    return S_OK;
+}
+
+extern "C" BOOL WINAPI Shim_GetDpiForMonitorInternal(HMONITOR hmonitor, int dpiType, UINT* dpiX, UINT* dpiY) {
+    (void)hmonitor;
+    (void)dpiType;
+    if (!dpiX || !dpiY) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *dpiX = 96;
+    *dpiY = 96;
+    return TRUE;
+}
+
+extern "C" UINT WINAPI Shim_GetDpiForSystem() {
+    return 96;
+}
+
+extern "C" UINT WINAPI Shim_GetDpiForWindow(HWND hwnd) {
+    (void)hwnd;
+    return 96;
 }
 
 int WINAPI Shim_GetObjectW(HANDLE h, int c, LPVOID pv) {
@@ -3493,6 +3765,28 @@ const ExportMapping kExportTable[] = {
     {"RegisterClipboardFormatA", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatA)},
     {"CoInitialize", reinterpret_cast<PVOID>(Shim_CoInitialize)},
     {"CopyEnhMetaFileA", reinterpret_cast<PVOID>(Shim_CopyEnhMetaFileA)},
+    {"CopyEnhMetaFileW", reinterpret_cast<PVOID>(Shim_CopyEnhMetaFileW)},
+    {"GetEnhMetaFileDescriptionA", reinterpret_cast<PVOID>(Shim_GetEnhMetaFileDescriptionA)},
+    {"GetEnhMetaFileDescriptionW", reinterpret_cast<PVOID>(Shim_GetEnhMetaFileDescriptionW)},
+    {"GetTextCharacterExtra", reinterpret_cast<PVOID>(Shim_GetTextCharacterExtra)},
+    {"LoadCursorFromFileA", reinterpret_cast<PVOID>(Shim_LoadCursorFromFileA)},
+    {"LoadCursorFromFileW", reinterpret_cast<PVOID>(Shim_LoadCursorFromFileW)},
+    {"SetGestureConfig", reinterpret_cast<PVOID>(Shim_SetGestureConfig)},
+    {"IsEqualGUID", reinterpret_cast<PVOID>(Shim_IsEqualGUID)},
+    {"InitializeFlatSB", reinterpret_cast<PVOID>(Shim_InitializeFlatSB)},
+    {"UninitializeFlatSB", reinterpret_cast<PVOID>(Shim_UninitializeFlatSB)},
+    {"FlatSB_EnableScrollBar", reinterpret_cast<PVOID>(Shim_FlatSB_EnableScrollBar)},
+    {"FlatSB_ShowScrollBar", reinterpret_cast<PVOID>(Shim_FlatSB_ShowScrollBar)},
+    {"FlatSB_GetScrollRange", reinterpret_cast<PVOID>(Shim_FlatSB_GetScrollRange)},
+    {"FlatSB_GetScrollInfo", reinterpret_cast<PVOID>(Shim_FlatSB_GetScrollInfo)},
+    {"FlatSB_GetScrollPos", reinterpret_cast<PVOID>(Shim_FlatSB_GetScrollPos)},
+    {"FlatSB_GetScrollProp", reinterpret_cast<PVOID>(Shim_FlatSB_GetScrollProp)},
+    {"FlatSB_SetScrollPos", reinterpret_cast<PVOID>(Shim_FlatSB_SetScrollPos)},
+    {"FlatSB_SetScrollInfo", reinterpret_cast<PVOID>(Shim_FlatSB_SetScrollInfo)},
+    {"FlatSB_SetScrollRange", reinterpret_cast<PVOID>(Shim_FlatSB_SetScrollRange)},
+    {"FlatSB_SetScrollProp", reinterpret_cast<PVOID>(Shim_FlatSB_SetScrollProp)},
+    {"sndPlaySoundA", reinterpret_cast<PVOID>(Shim_sndPlaySoundA)},
+    {"sndPlaySoundW", reinterpret_cast<PVOID>(Shim_sndPlaySoundW)},
     {"CreatePenIndirect", reinterpret_cast<PVOID>(Shim_CreatePenIndirect)},
     {"GetTextExtentPoint32A", reinterpret_cast<PVOID>(Shim_GetTextExtentPoint32A)},
     {"SetWinMetaFileBits", reinterpret_cast<PVOID>(Shim_SetWinMetaFileBits)},
@@ -3514,6 +3808,17 @@ const ExportMapping kExportTable[] = {
     {"RestoreDC", reinterpret_cast<PVOID>(Shim_RestoreDC)},
     {"GetDeviceCaps", reinterpret_cast<PVOID>(Shim_GetDeviceCaps)},
     {"GetSystemMetrics", reinterpret_cast<PVOID>(Shim_GetSystemMetrics)},
+    {"GetSystemMetricsForDpi", reinterpret_cast<PVOID>(Shim_GetSystemMetricsForDpi)},
+    {"EnumDisplayMonitors", reinterpret_cast<PVOID>(Shim_EnumDisplayMonitors)},
+    {"MonitorFromPoint", reinterpret_cast<PVOID>(Shim_MonitorFromPoint)},
+    {"MonitorFromRect", reinterpret_cast<PVOID>(Shim_MonitorFromRect)},
+    {"MonitorFromWindow", reinterpret_cast<PVOID>(Shim_MonitorFromWindow)},
+    {"GetMonitorInfoW", reinterpret_cast<PVOID>(Shim_GetMonitorInfoW)},
+    {"GetMonitorInfoA", reinterpret_cast<PVOID>(Shim_GetMonitorInfoA)},
+    {"GetDpiForMonitor", reinterpret_cast<PVOID>(Shim_GetDpiForMonitor)},
+    {"GetDpiForMonitorInternal", reinterpret_cast<PVOID>(Shim_GetDpiForMonitorInternal)},
+    {"GetDpiForSystem", reinterpret_cast<PVOID>(Shim_GetDpiForSystem)},
+    {"GetDpiForWindow", reinterpret_cast<PVOID>(Shim_GetDpiForWindow)},
     {"GetObjectW", reinterpret_cast<PVOID>(Shim_GetObjectW)},
     {"GetObjectA", reinterpret_cast<PVOID>(Shim_GetObjectA)},
     {"GetObjectType", reinterpret_cast<PVOID>(Shim_GetObjectType)},
@@ -4061,6 +4366,7 @@ void RefreshHooksLocked() {
     TryDiscoverModuleLocked(GetModuleHandleW(L"ole32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"gdi32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"oleaut32.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"shcore.dll"));
 
     bool enable = !IsOsShimDisabledByEnv();
     g_IsActive = enable;
@@ -4118,7 +4424,8 @@ VOID CALLBACK OnDllNotification(
         (cch == 10 && _wcsnicmp(name->Buffer, L"user32.dll", 10) == 0) ||
         (cch == 9 && _wcsnicmp(name->Buffer, L"ole32.dll", 9) == 0) ||
         (cch == 9 && _wcsnicmp(name->Buffer, L"gdi32.dll", 9) == 0) ||
-        (cch == 12 && _wcsnicmp(name->Buffer, L"oleaut32.dll", 12) == 0)) {
+        (cch == 12 && _wcsnicmp(name->Buffer, L"oleaut32.dll", 12) == 0) ||
+        (cch == 10 && _wcsnicmp(name->Buffer, L"shcore.dll", 10) == 0)) {
         EnsureLocksInitialized();
         EnterCriticalSection(&g_HookLock);
         RefreshHooksLocked();
@@ -4162,6 +4469,7 @@ extern "C" void WINAPI NanoServerStaShim_RestoreOriginal() {
     TryDiscoverModuleLocked(GetModuleHandleW(L"ole32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"gdi32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"oleaut32.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"shcore.dll"));
     g_IsActive = false;
     for (auto& mod : g_HookedModules) {
         ApplyModuleState(mod, false);

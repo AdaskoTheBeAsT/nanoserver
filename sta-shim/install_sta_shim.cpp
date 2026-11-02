@@ -652,7 +652,8 @@ bool CopyRequiredFile(const std::wstring& source, const std::wstring& destinatio
 }
 
 const std::vector<const char*> kGdi32Exports = {
-    "CopyEnhMetaFileA", "CreatePenIndirect", "GetTextExtentPoint32A", "SetWinMetaFileBits",
+    "CopyEnhMetaFileA", "CopyEnhMetaFileW", "GetEnhMetaFileDescriptionA", "GetEnhMetaFileDescriptionW",
+    "GetTextCharacterExtra", "CreatePenIndirect", "GetTextExtentPoint32A", "SetWinMetaFileBits",
     "CopyMetaFileA", "CreateBitmapIndirect", "CreateDiscardableBitmap", "CreateEllipticRgnIndirect",
     "CreateHalftonePalette", "CreateICA", "CreatePolygonRgn", "EnumFontsA",
     "Escape", "GetBrushOrgEx", "GetNearestColor", "GetTextExtentPointA",
@@ -677,15 +678,25 @@ const std::vector<const char*> kUser32Exports = {
     "DdeCreateDataHandle", "DdeCreateStringHandleA", "DdeDisconnect", "DdeFreeDataHandle",
     "DdeFreeStringHandle", "DdeGetData", "DdeGetLastError", "DdeInitializeA",
     "DdeNameService", "DdePostAdvise", "DdeQueryConvInfo", "DdeQueryStringA",
-    "DdeSetUserHandle", "DdeUninitialize", "MapVirtualKeyExA"
+    "DdeSetUserHandle", "DdeUninitialize", "MapVirtualKeyExA",
+    "LoadCursorFromFileA", "LoadCursorFromFileW", "SetGestureConfig"
 };
 const std::vector<const char*> kOle32Exports = {
-    "CoIsOle1Class", "OleConvertIStorageToOLESTREAM", "OleConvertOLESTREAMToIStorage",
+    "CoIsOle1Class", "IsEqualGUID", "OleConvertIStorageToOLESTREAM", "OleConvertOLESTREAMToIStorage",
     "OleCreateLink", "OleDoAutoConvert"
 };
-const std::vector<const char*> kComctl32Exports = {"ImageList_GetIconSize", "ImageList_SetIconSize"};
+const std::vector<const char*> kComctl32Exports = {
+    "ImageList_GetIconSize", "ImageList_SetIconSize",
+    "InitializeFlatSB", "UninitializeFlatSB",
+    "FlatSB_EnableScrollBar", "FlatSB_ShowScrollBar",
+    "FlatSB_GetScrollRange", "FlatSB_GetScrollInfo", "FlatSB_GetScrollPos", "FlatSB_GetScrollProp",
+    "FlatSB_SetScrollPos", "FlatSB_SetScrollInfo", "FlatSB_SetScrollRange", "FlatSB_SetScrollProp"
+};
 const std::vector<const char*> kShell32Exports = {
     "DragQueryFileW", "SHGetPathFromIDListW", "SHGetSpecialFolderLocation"
+};
+const std::vector<const char*> kWinmmExports = {
+    "PlaySoundA", "sndPlaySoundA", "sndPlaySoundW"
 };
 const std::vector<const char*> kNoExports;
 
@@ -695,6 +706,7 @@ const std::vector<const char*>& RequiredExports(const std::wstring& name) {
     if (name == L"ole32.dll") return kOle32Exports;
     if (name == L"comctl32.dll") return kComctl32Exports;
     if (name == L"shell32.dll") return kShell32Exports;
+    if (name == L"winmm.dll") return kWinmmExports;
     return kNoExports;
 }
 
@@ -768,7 +780,7 @@ bool PreflightPe(const std::wstring& path, WORD machine) {
 
 bool PreflightArchitecture(const std::wstring& payload, const std::wstring& systemDirectory, WORD machine) {
     if (!PreflightPe(payload, machine)) return false;
-    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll"}) {
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll"}) {
         if (!PreflightPe(systemDirectory + L"\\forwarders\\" + name, machine)) return false;
     }
     return true;
@@ -777,7 +789,7 @@ bool PreflightArchitecture(const std::wstring& payload, const std::wstring& syst
 bool InstallArchitecture(const std::wstring& payload, const std::wstring& systemDirectory) {
     if (!CopyRequiredFile(payload, systemDirectory + L"\\nanoserver_sta_shim.dll") ||
         !CopyRequiredFile(payload, systemDirectory + L"\\forwarders\\nanoserver_sta_shim.dll")) return false;
-    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll"}) {
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll"}) {
         std::wstring forwarder = systemDirectory + L"\\forwarders\\" + name;
         const auto& exports = RequiredExports(name);
         if (!PatchPeFileImports(forwarder.c_str()) || !PatchPeFileExports(forwarder.c_str(), exports) ||

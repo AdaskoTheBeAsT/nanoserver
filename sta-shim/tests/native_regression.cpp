@@ -740,6 +740,41 @@ void TestAnsiAndHeadlessGdi(bool shim) {
         if (gdip) FreeLibrary(gdip);
         if (msimg) FreeLibrary(msimg);
     }
+    int enumMonitorsCount = 0;
+    BOOL enumMonitorsOk = EnumDisplayMonitors(nullptr, nullptr,
+        [](HMONITOR, HDC, LPRECT, LPARAM data) -> BOOL {
+            ++(*reinterpret_cast<int*>(data));
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&enumMonitorsCount));
+    HMONITOR hMon = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW miW{};
+    miW.cbSize = sizeof(miW);
+    BOOL monInfoOk = GetMonitorInfoW(hMon, &miW);
+    Check("Delphi_headless_monitor_enumeration_and_info",
+        enumMonitorsOk != FALSE && enumMonitorsCount >= 1 && hMon != nullptr &&
+        monInfoOk != FALSE && miW.rcMonitor.right > miW.rcMonitor.left && miW.rcMonitor.bottom > miW.rcMonitor.top);
+    HMODULE shimMod = GetModuleHandleW(L"nanoserver_sta_shim.dll");
+    if (shimMod) {
+        using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+        auto pGetDpi = reinterpret_cast<GetDpiForMonitorFn>(GetProcAddress(shimMod, "GetDpiForMonitor"));
+        UINT monDpiX = 0, monDpiY = 0;
+        HRESULT hrDpi = pGetDpi ? pGetDpi(hMon, 0, &monDpiX, &monDpiY) : E_FAIL;
+        Check("Delphi_vcl_exports_and_dpi_on_shim",
+            SUCCEEDED(hrDpi) && monDpiX == 96 && monDpiY == 96 &&
+            GetProcAddress(shimMod, "CopyEnhMetaFileW") != nullptr &&
+            GetProcAddress(shimMod, "GetEnhMetaFileDescriptionA") != nullptr &&
+            GetProcAddress(shimMod, "GetEnhMetaFileDescriptionW") != nullptr &&
+            GetProcAddress(shimMod, "GetTextCharacterExtra") != nullptr &&
+            GetProcAddress(shimMod, "LoadCursorFromFileA") != nullptr &&
+            GetProcAddress(shimMod, "LoadCursorFromFileW") != nullptr &&
+            GetProcAddress(shimMod, "SetGestureConfig") != nullptr &&
+            GetProcAddress(shimMod, "IsEqualGUID") != nullptr &&
+            GetProcAddress(shimMod, "InitializeFlatSB") != nullptr &&
+            GetProcAddress(shimMod, "UninitializeFlatSB") != nullptr &&
+            GetProcAddress(shimMod, "FlatSB_SetScrollProp") != nullptr &&
+            GetProcAddress(shimMod, "sndPlaySoundA") != nullptr &&
+            GetProcAddress(shimMod, "sndPlaySoundW") != nullptr);
+    }
 }
 
 void TestRouting(bool requireShim) {

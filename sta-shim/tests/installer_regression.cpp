@@ -317,7 +317,7 @@ void Reset(bool wow64 = true) {
         WORD machine = isWow ? IMAGE_FILE_MACHINE_I386 : IMAGE_FILE_MACHINE_AMD64;
         directories.insert(system);
         directories.insert(system + L"\\forwarders");
-        for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll"}) {
+        for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll"}) {
             files[system + L"\\forwarders\\" + name] = {Fixture(machine)};
             files[system + L"\\" + name] = {Fixture(machine)};
         }
@@ -395,7 +395,9 @@ int main() {
     Check("R02_repeat_install", Install() == 0 && files.size() == installed.size() && !liveTruncated);
     Check("R02_verified_PE32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\user32.dll", kUser32Exports));
     Check("R02_verified_PE32_ole32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\ole32.dll", kOle32Exports));
+    Check("R02_verified_PE32_comctl32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\comctl32.dll", kComctl32Exports));
     Check("R02_verified_PE32_shell32_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\shell32.dll", kShell32Exports));
+    Check("R02_verified_PE32_winmm_exports", VerifyPatchedPe(L"C:\\Windows\\SysWOW64\\forwarders\\winmm.dll", kWinmmExports));
     Check("R02_verified_PE64_exports", VerifyPatchedPe(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", kGdi32Exports));
     files[L"C:\\Windows\\System32\\forwarders\\gdi32.dll"].Bytes[0] = 0;
     Check("R02_verification_rejects_corruption", !VerifyPatchedPe(L"C:\\Windows\\System32\\forwarders\\gdi32.dll", kGdi32Exports));

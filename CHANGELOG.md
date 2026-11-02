@@ -6,6 +6,59 @@ applications, and build tooling.
 Versions below identify the repository and container revision, not the bundled
 .NET runtime version.
 
+## 1.6.0 - 2026-11-02
+
+### Added
+
+- Full 32-bit Embarcadero / Borland Delphi VCL runtime (`System.Classes`,
+  `Vcl.Graphics`, `Vcl.Controls`, `Vcl.Forms`, `Winapi.FlatSB`,
+  `Winapi.MMSystem`), headless primary monitor, and per-monitor DPI support on
+  Windows Nano Server 2025:
+  - Added 22 missing static and delay-loaded PE exports required by Delphi VCL
+    calculation DLLs to `nanoserver_sta_shim.dll` and `install_sta_shim.exe`:
+    - `gdi32.dll` (4 exports): `CopyEnhMetaFileW`,
+      `GetEnhMetaFileDescriptionA`, `GetEnhMetaFileDescriptionW`, and
+      `GetTextCharacterExtra`.
+    - `user32.dll` (3 exports): `LoadCursorFromFileA`, `LoadCursorFromFileW`,
+      and `SetGestureConfig`.
+    - `ole32.dll` (1 export): `IsEqualGUID`.
+    - `comctl32.dll` (12 Flat Scroll Bar exports): `InitializeFlatSB`,
+      `UninitializeFlatSB`, `FlatSB_EnableScrollBar`, `FlatSB_ShowScrollBar`,
+      `FlatSB_GetScrollRange`, `FlatSB_GetScrollInfo`, `FlatSB_GetScrollPos`,
+      `FlatSB_GetScrollProp`, `FlatSB_SetScrollPos`, `FlatSB_SetScrollInfo`,
+      `FlatSB_SetScrollRange`, and `FlatSB_SetScrollProp`.
+    - `winmm.dll` (2 exports): `sndPlaySoundA` and `sndPlaySoundW` (alongside
+      `PlaySoundA`).
+  - Implemented 11 headless primary monitor (`HMONITOR = 0x00010001`, monitor
+    bounds `1024x768`, work area `1024x746`, device `"\\\\.\\DISPLAY1"`) and
+    96-DPI per-monitor/system/window shims (`GetSystemMetricsForDpi`,
+    `EnumDisplayMonitors`, `MonitorFromPoint`, `MonitorFromRect`,
+    `MonitorFromWindow`, `GetMonitorInfoW`, `GetMonitorInfoA`,
+    `GetDpiForMonitor`, `GetDpiForMonitorInternal`, `GetDpiForSystem`, and
+    `GetDpiForWindow`).
+  - Added `shcore.dll` module discovery in `nanoserver_sta_shim.cpp`
+    (`RefreshHooksLocked`, `OnDllNotification`, and
+    `NanoServerStaShim_RestoreOriginal`) so `SHCore.dll`'s delay-load imports
+    (`ext-ms-win-rtcore-ntuser-dpi-l1-1-0.dll!GetDpiForMonitorInternal` and
+    `ext-ms-win-rtcore-ntuser-sysparams-l1-1-0.dll!MonitorFromWindow` /
+    `MonitorFromPoint`) resolve to the 96-DPI headless monitor shim when
+    Delphi VCL initializes `TScreen` and `TCustomForm`.
+  - Added native regression checks
+    `Delphi_headless_monitor_enumeration_and_info` and
+    `Delphi_vcl_exports_and_dpi_on_shim` in
+    `sta-shim/tests/native_regression.cpp`, and installer regression checks
+    `R02_verified_PE32_comctl32_exports` and `R02_verified_PE32_winmm_exports`
+    in `sta-shim/tests/installer_regression.cpp`.
+
+### Changed
+
+- Extended `install_sta_shim.exe` to patch `winmm.dll` in
+  `System32\forwarders` and `SysWOW64\forwarders` alongside `user32.dll`,
+  `ole32.dll`, `gdi32.dll`, `comctl32.dll`, and `shell32.dll`.
+- Updated all six flavour `push.ps1` scripts, `README.md`, and
+  `sta-shim/tests/test_scripts.ps1` to container revision `1.6.0` (`-v1.6.0`,
+  `-v1.6`, `-v1`).
+
 ## 1.5.0 - 2026-11-01
 
 ### Added

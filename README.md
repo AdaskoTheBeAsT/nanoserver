@@ -56,9 +56,10 @@ Out of the box, `mcr.microsoft.com/windows/nanoserver:ltsc2025` **cannot** run a
 | ❌ **No IIS 10 included** | Installs `Microsoft.NanoServer.IIS` using online `DISM /Add-Capability`, configures IIS, and monitors WAS and W3SVC in the foreground. |
 | ❌ **No `msiexec` or `netsh` to install ASP.NET Core Hosting Bundle (ANCM V2)** | ✅ Extracts `aspnetcoremodule_x64_en_v2.msi` in a builder stage and uses a standalone C# tool (`dotnet RegisterAncm.dll`) to register `aspnetcorev2.dll` and inject the `system.webServer/aspNetCore` schema into `applicationHost.config`. |
 | ❌ **No Full .NET Framework 4.8.1 (`net481`) or `System.Web`** | ✅ Transplants `C:\Windows\Microsoft.NET` (`Framework` + `Framework64`), native CLR CRT forwarders (`mscoree.dll`, `ucrtbase_clr0400.dll`, `vcruntime140_clr0400.dll`, `vcruntime140_1_clr0400.dll`), 32-bit/64-bit `inetsrv`, and NDP/ASP.NET registry hives from Server Core into Nano Server. |
-| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` / `gdi32.dll` / `comctl32.dll` / `shell32.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
+| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` / `gdi32.dll` / `comctl32.dll` / `shell32.dll` / `winmm.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
 | ❌ **No 32-bit Visual Basic 6 (`msvbvm60.dll`) runtime, legacy DDE/GDI/OLE1 PE exports, ANSI windowing, or registration-free `IDispatch` TypeLib marshaling** | ✅ Pre-installs `msvbvm60.dll` in `SysWOW64` across all 5 WoW64-enabled images, adds 35 missing `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` forwarder exports, provides ANSI window/class/message/clipboard and headless 96-DPI GDI device-context shims, and hooks `oleaut32.dll` (`SxsOleAut32RedirectTypeLibrary`) to resolve embedded `TYPELIB` resources in-memory without `HKCR\TypeLib` registry keys or `sxs.dll`. |
 | ❌ **No 32-bit Visual C++ 10.0 / MFC 10.0 (`mfc100u.dll`, `mfc100.dll`, `atl100.dll`, `msvcr100.dll`, `msvcp100.dll`), `gdiplus.dll`, or `msimg32.dll` runtimes, missing GDI path/transform/metafile exports, or broken `shell32.dll` forwarders (`windows.storage.dll.*`)** | ✅ Pre-installs the 32-bit VC++ 10.0 / MFC 10.0 runtime suite, `msimg32.dll`, and `gdiplus.dll` into `SysWOW64` across all 5 WoW64-enabled images, adds 46 missing `gdi32.dll` (40 exports), `user32.dll` (`MapVirtualKeyExA`), `shell32.dll` (`SHGetPathFromIDListW`, `DragQueryFileW`, `SHGetSpecialFolderLocation`), `winspool.drv` (`GetJobA`), and `winmm.dll` (`PlaySoundA`) exports, redirects broken `shell32.dll` forwarders (`windows.storage.dll.*`) to `nanoserver_sta_shim.dll`, and removes `SHELL32` and `gdiplus` from `KnownDLLs`. |
+| ❌ **No Embarcadero / Borland Delphi VCL (`Vcl.Forms`, `Vcl.Controls`, `Vcl.Graphics`, `Winapi.FlatSB`, `Winapi.MMSystem`) PE exports, headless display monitor (`EnumDisplayMonitors` / `GetMonitorInfo`), or per-monitor DPI (`SHCore!GetDpiForMonitor`)** | ✅ Adds 22 missing Delphi VCL forwarder exports across `gdi32.dll` (`CopyEnhMetaFileW`, `GetEnhMetaFileDescriptionA/W`, `GetTextCharacterExtra`), `user32.dll` (`LoadCursorFromFileA/W`, `SetGestureConfig`), `ole32.dll` (`IsEqualGUID`), `comctl32.dll` (12 `FlatSB_*` exports), and `winmm.dll` (`sndPlaySoundA/W` alongside `PlaySoundA`), implements 11 headless monitor and 96-DPI exports (`EnumDisplayMonitors`, `MonitorFromPoint/Rect/Window`, `GetMonitorInfoA/W`, `GetSystemMetricsForDpi`, `GetDpiForMonitor/Internal/System/Window`) for a synthetic `1024x768` primary monitor, and hooks `SHCore.dll` delay-load tables so Delphi VCL `TScreen` and `TCustomForm` initialize cleanly without `STATUS_INTEGER_DIVIDE_BY_ZERO`. |
 
 ---
 
@@ -160,48 +161,69 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.5.0`, `-v1.5`, `-v1`).
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.6.0`, `-v1.6`, `-v1`).
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.5.0, -v1.5, and -v1
-.\set-version.ps1 -Version 1.5.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v1.6.0, -v1.6, and -v1
+.\set-version.ps1 -Version 1.6.0
 
 # Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.5.0 -DotNetVersion 10.0.14
+.\set-version.ps1 -Version 1.6.0 -DotNetVersion 10.0.14
 ```
 
 - **ASP.NET Core 10 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.5.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.5`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.6.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.6`
   - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
 - **ASP.NET Core 10 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.5.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.5`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.6.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.6`
   - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.5.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.5`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.6.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.6`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.5.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.5`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.6.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.6`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.5.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.5`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.6.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.6`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.5.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.5`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.6.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.6`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
+
+---
+
+## ✨ What's New in `v1.6.0`
+
+Container revision **`1.6.0`** adds end-to-end support for **32-bit Embarcadero / Borland Delphi VCL (`System.Classes`, `Vcl.Forms`, `Vcl.Controls`, `Vcl.Graphics`, `Winapi.FlatSB`, `Winapi.MMSystem`) calculation libraries**, **headless primary monitor enumeration**, and **per-monitor 96-DPI scaling** on Windows Nano Server 2025 (see [`CHANGELOG.md`](./CHANGELOG.md) and [Breakthrough #6 below](#8-breakthrough-6-running-legacy-32-bit-embarcadero--borland-delphi-vcl-calculation-dlls-flatsb-headless-primary-monitor--per-monitor-dpi)):
+
+- **Added — 22 Delphi VCL Forwarder Exports (`gdi32.dll`, `user32.dll`, `ole32.dll`, `comctl32.dll`, `winmm.dll`):**
+  - **`gdi32.dll` (4 added, 74 total shimmed forwarder exports):** `CopyEnhMetaFileW`, `GetEnhMetaFileDescriptionA`, `GetEnhMetaFileDescriptionW`, and `GetTextCharacterExtra`.
+  - **`user32.dll` (3 added, 27 total shimmed forwarder exports):** `LoadCursorFromFileA`, `LoadCursorFromFileW`, and `SetGestureConfig`.
+  - **`ole32.dll` (1 added, 6 total shimmed forwarder exports):** `IsEqualGUID`.
+  - **`comctl32.dll` (12 added Flat Scroll Bar exports, 14 total shimmed forwarder exports):** `InitializeFlatSB`, `UninitializeFlatSB`, `FlatSB_EnableScrollBar`, `FlatSB_ShowScrollBar`, `FlatSB_GetScrollRange`, `FlatSB_GetScrollInfo`, `FlatSB_GetScrollPos`, `FlatSB_GetScrollProp`, `FlatSB_SetScrollPos`, `FlatSB_SetScrollInfo`, `FlatSB_SetScrollRange`, and `FlatSB_SetScrollProp`.
+  - **`winmm.dll` (2 added exports, 3 total patched forwarder exports):** `sndPlaySoundA` and `sndPlaySoundW` alongside `PlaySoundA`.
+- **Added — 11 Headless Primary Monitor & Per-Monitor 96-DPI Shims (`TScreen` & `TCustomForm` Compatibility):**
+  - Even headless Delphi DLLs that link `Vcl.Forms` / `Vcl.Controls` enumerate display monitors (`EnumDisplayMonitors`, `MonitorFromWindow`, `MonitorFromPoint`, `MonitorFromRect`, `GetMonitorInfoW`, `GetMonitorInfoA`) and query per-monitor DPI (`SHCore!GetDpiForMonitor`, `GetDpiForMonitorInternal`, `user32!GetSystemMetricsForDpi`, `GetDpiForSystem`, `GetDpiForWindow`).
+  - On stock Nano Server, `EnumDisplayMonitors` returns `0` monitors and `GetDpiForMonitor` returns `0` DPI, causing `TCustomForm` initialization (`ReadState` / `ScaleForPPI`) to crash with hardware exception `0xC0000094` (`STATUS_INTEGER_DIVIDE_BY_ZERO`, `idiv ecx` where `FCurrentPPI == 0`).
+  - `nanoserver_sta_shim.dll` now provides a synthetic `1024x768` primary monitor (`HMONITOR = 0x00010001`, work area `1024x746`, device `"\\.\DISPLAY1"`, `MONITORINFOF_PRIMARY`) and returns `96x96` DPI across all 11 monitor/DPI APIs (33 new exports in `nanoserver_sta_shim.dll` in total).
+- **Modified / Changed — `SHCore.dll` Delay-Load Hooking & `winmm.dll` Forwarder Patching:**
+  - Extended `nanoserver_sta_shim.dll` (`RefreshHooksLocked`, `OnDllNotification`, and `NanoServerStaShim_RestoreOriginal`) to discover and hook `shcore.dll` delay-load tables (`ext-ms-win-rtcore-ntuser-dpi-l1-1-0.dll` and `ext-ms-win-rtcore-ntuser-sysparams-l1-1-0.dll`) when `SHCore.dll` is loaded.
+  - Extended `install_sta_shim.exe` (`PreflightArchitecture`, `InstallArchitecture`, and `RequiredExports`) to preflight, patch, and verify `winmm.dll` in `System32\forwarders` and `SysWOW64\forwarders` and copy the patched forwarder to `System32\winmm.dll` and `SysWOW64\winmm.dll`.
+  - Added native regression checks (`Delphi_headless_monitor_enumeration_and_info`, `Delphi_vcl_exports_and_dpi_on_shim`) in `sta-shim/tests/native_regression.cpp` and installer PE verification checks (`R02_verified_PE32_comctl32_exports`, `R02_verified_PE32_winmm_exports`) in `sta-shim/tests/installer_regression.cpp`.
 
 ---
 
@@ -252,6 +274,7 @@ Container revision **`1.3.0`** completes the full [Roundtable review (`R01`–`R
 | ✅ **Registration-Free COM with `.manifest` via `DllGetClassObject` + `CoRegisterClassObject` Fallback** | **Exercised by the included COM fixtures** | Verified with `NativeCOM.dll` + `NativeCOM.manifest`: when `CreateActCtxW` returns `ERROR_INVALID_FUNCTION (1)`, parsing `<comClass clsid="{...}"/>` from the `.manifest` file, calling `DllGetClassObject` on the COM DLL, and registering the `IClassFactory` in-memory via `combase!CoRegisterClassObject(..., CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, out cookie)` allows `new StringConcatenatorClass()` (`CoCreateInstance`) to succeed with `S_OK` on both `x86` and `x64` Nano Server without `regsvr32` or OS modifications! |
 | ✅ **32-Bit Visual Basic 6 (`msvbvm60.dll`) ActiveX/COM DLLs & Registration-Free `IDispatch` TypeLib Marshaling** | **Supported in all 5 WoW64-enabled images (`v1.4.0+`)** | Pre-installs `SysWOW64\msvbvm60.dll`, adds 35 missing `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` PE forwarder exports, provides ANSI window/class/message/clipboard and headless 96-DPI GDI shims for VB6 runtime startup (`VBBubbleRT6`, `VBFocusRT6`, `IDEOwner`), and redirects `oleaut32!LoadRegTypeLib` (`SxsOleAut32RedirectTypeLibrary`) to embedded `TYPELIB` PE resources via `LoadTypeLibEx(..., REGKIND_NONE, ...)`. |
 | ✅ **32-Bit Visual C++ 10.0 / MFC 10.0 (`mfc100u.dll`, `mfc100.dll`, `atl100.dll`, `msvcr100.dll`, `msvcp100.dll`) & GDI+ (`gdiplus.dll`) Native Calculation DLLs** | **Supported in all 5 WoW64-enabled images (`v1.5.0+`)** | Pre-installs `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`, `msimg32.dll`, and `gdiplus.dll` into `SysWOW64`, adds 46 missing exports across `gdi32.dll`, `user32.dll`, `shell32.dll`, `winspool.drv`, and `winmm.dll`, and redirects broken `shell32.dll` forwarders (`windows.storage.dll.*`) to `nanoserver_sta_shim.dll`. |
+| ✅ **32-Bit Embarcadero / Borland Delphi VCL (`Vcl.Forms`, `Vcl.Controls`, `Vcl.Graphics`, `Winapi.FlatSB`, `Winapi.MMSystem`) Calculation DLLs** | **Supported across all images (`v1.6.0+`)** | Adds 22 missing Delphi VCL forwarder exports across `gdi32.dll`, `user32.dll`, `ole32.dll`, `comctl32.dll` (12 `FlatSB_*` exports), and `winmm.dll` (`sndPlaySoundA/W` alongside `PlaySoundA`), provides 11 headless monitor and 96-DPI exports for a synthetic `1024x768` primary monitor (`EnumDisplayMonitors`, `MonitorFromPoint/Rect/Window`, `GetMonitorInfoA/W`, `GetSystemMetricsForDpi`, `GetDpiForMonitor/Internal/System/Window`), and hooks `SHCore.dll` delay-load tables so `TScreen` and `TCustomForm` initialize cleanly in headless containers. |
 | **Single-Threaded Apartment (`STA`) and Win32 message pumping** | **Scoped headless implementation, not full Win32 parity** | Native OS-level shimming and the external managed NuGet shim are separate implementations. See the support table below and run the native and managed regression suites for your build. Exact unshimmed failure codes, including `E_NOTIMPL`, depend on the OS build and call path and are not guaranteed here. |
 
 ### Native STA shim support and limitations
@@ -277,6 +300,7 @@ and `WAS`/`W3SVC` host-loss qualification pass across all six flavours; see
 | ANSI window, class, message and clipboard APIs (`v1.4.0+`) | `RegisterClass[Ex]A`, `UnregisterClassA`, `GetClassInfo[Ex]A`, `GetClassNameA`, `Get/SetClassLongA`, `CreateWindowExA`, `DefWindowProcA`, `CallWindowProcA`, `Get/SetWindowLong[Ptr]A`, `Peek/Get/Dispatch/Post/SendMessageA`, `PostThreadMessageA`, and `Register/GetClipboardFormat[Name]A` bridged to the user-mode STA window engine | Headless STA windowing and message dispatch only; does not translate complex message-specific ANSI/Unicode `lParam` structures beyond `WM_NCCREATE`/`WM_CREATE`. |
 | Headless GDI, screen metrics, DDE & OLE1 forwarders (`v1.4.0+`) | 96-DPI headless device contexts (`GetDC`, `GetDeviceCaps`, `GetStockObject`, `GetSystemMetrics`, `SelectObject`, `DeleteObject`, `GetTextMetricsA/W`, `GetSysColorBrush`) plus 35 static PE forwarders across `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` | Synthetic handles and fixed 96-DPI/font metrics for headless runtime startup (`msvbvm60.dll`, VCL, ATL). Not a replacement for a physical display, GDI rendering, or DDE conversation transport. |
 | Visual C++ 10.0 / MFC 10.0, GDI+ & `shell32.dll` broken-forwarder redirection (`v1.5.0+`) | Pre-installed 32-bit `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`, `msimg32.dll`, and `gdiplus.dll` in `SysWOW64`; 40 additional `gdi32.dll` path/transform/metafile/region/palette exports, `user32!MapVirtualKeyExA`, `winspool.drv!GetJobA`, `winmm!PlaySoundA`, and redirection of `shell32.dll`'s broken `windows.storage.dll.*` forwarders (`SHGetPathFromIDListW`, `DragQueryFileW`, `SHGetSpecialFolderLocation`) | Headless compatibility stubs so `mfc100u.dll`, `mfc100.dll`, and `gdiplus.dll` load and initialize cleanly in headless containers; does not provide interactive shell dialogs, printing, audio playback, or full metafile rendering. |
+| Embarcadero / Borland Delphi VCL exports, headless primary monitor & per-monitor DPI (`v1.6.0+`) | 22 additional PE forwarder exports across `gdi32.dll` (`CopyEnhMetaFileW`, `GetEnhMetaFileDescriptionA/W`, `GetTextCharacterExtra`), `user32.dll` (`LoadCursorFromFileA/W`, `SetGestureConfig`), `ole32.dll` (`IsEqualGUID`), `comctl32.dll` (12 `FlatSB_*` exports), and `winmm.dll` (`sndPlaySoundA/W` + `PlaySoundA` forwarder patching); 11 monitor/DPI exports providing a synthetic `1024x768` primary monitor (`HMONITOR = 0x00010001`, `EnumDisplayMonitors`, `MonitorFromPoint/Rect/Window`, `GetMonitorInfoA/W`) and 96-DPI scaling (`GetSystemMetricsForDpi`, `GetDpiForMonitor/Internal/System/Window` + `SHCore.dll` delay-load hooking) | Single synthetic 96-DPI primary monitor (`\\.\DISPLAY1`) for headless VCL `TScreen` / `TCustomForm` initialization; does not emulate multi-monitor topologies or dynamic DPI changes. |
 | Registration-free TypeLib redirection (`v1.4.0+`) | Hooks `oleaut32.dll` (`ext-ms-win-sxs-oleautomation-l1-1-0!SxsOleAut32RedirectTypeLibrary`) and scans loaded modules in the current process for embedded `TYPELIB` resources matching the requested `LIBID` via `LoadTypeLibEx(..., REGKIND_NONE, ...)` | Resolves `TYPELIB` resources embedded in already-loaded process DLLs; external standalone `.tlb` files that are not loaded as modules require explicit loading or registry entries. |
 | Hook memory protection (R17, R19) | Serialized writes, no-op skipping, derived-address bounds checks and original page-protection restoration | Non-executable data pages become writable without execute access. An already-executable page may briefly become writable and executable. This is not a blanket W^X guarantee. |
 
@@ -298,7 +322,7 @@ Both the container-level native STA shim (`nanoserver_sta_shim.dll`) and the `Ad
 
 | Environment Variable / API | Target | Effect when Set to `1` / `true` |
 | :--- | :--- | :--- |
-| `NANOSERVER_DISABLE_STA_SHIM=1` | **OS-Level Native Shim** (`nanoserver_sta_shim.dll` in `System32` & `SysWOW64`) | Disables the container's native IAT hooks on `combase.dll`, `ole32.dll`, and `user32.dll` (and exports `NanoServerStaShim_RestoreOriginal()` / `NanoServerStaShim_Refresh()` so managed code can toggle it dynamically). |
+| `NANOSERVER_DISABLE_STA_SHIM=1` | **OS-Level Native Shim** (`nanoserver_sta_shim.dll` in `System32` & `SysWOW64`) | Disables the container's native IAT and delay-load hooks on `combase.dll`, `ole32.dll`, `user32.dll`, `gdi32.dll`, `oleaut32.dll`, and `shcore.dll` (and exports `NanoServerStaShim_RestoreOriginal()` / `NanoServerStaShim_Refresh()` so managed code can toggle it dynamically). |
 | `ADASKO_NANOSERVER_DISABLE_STA_SHIM=1` / `NanoServerOptions.EnableStaShim = false` | **Library-Level In-Process STA Shim** (`AdaskoTheBeAsT.Interop.COM`) | Disables `AdaskoTheBeAsT.Interop.COM`'s built-in managed STA & Win32 message-queue shim (`NanoServerStaShim`). When both switches are set, the shims are disabled; do not assume a particular unshimmed HRESULT without a control on the selected OS build. |
 | `ADASKO_NANOSERVER_DISABLE_SXS_FALLBACK=1` / `NanoServerOptions.EnableSxsFallback = false` | **Library-Level SxS Manifest Fallback** (`AdaskoTheBeAsT.Interop.COM`) | Disables the automatic `DllGetClassObject` + `CoRegisterClassObject` manifest fallback when `CreateActCtxW` fails on Nano Server. |
 
@@ -621,13 +645,13 @@ The native C++ shim and the external C# package both provide headless window/mes
 
 1. **Container build:** `install_sta_shim.exe` refuses a host with
    `System32\win32u.dll`. It preflights the payload and the `user32.dll`,
-   `ole32.dll`, `gdi32.dll`, `comctl32.dll`, and `shell32.dll` forwarders for
-   each selected architecture before changing system files. The five images that
-   install WOW64 pass `--require-wow64` (`/require-x86` is an alias) and also
-   preflight and install the eight 32-bit runtime DLLs (`msvbvm60.dll`,
-   `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`,
-   `msimg32.dll`, and `gdiplus.dll`) into `C:\Windows\SysWOW64`; x64 Kestrel
-   does not require an x86 payload.
+   `ole32.dll`, `gdi32.dll`, `comctl32.dll`, `shell32.dll`, and `winmm.dll`
+   forwarders for each selected architecture before changing system files. The
+   five images that install WOW64 pass `--require-wow64` (`/require-x86` is an
+   alias) and also preflight and install the eight 32-bit runtime DLLs
+   (`msvbvm60.dll`, `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`,
+   `mfc100u.dll`, `msimg32.dll`, and `gdiplus.dll`) into `C:\Windows\SysWOW64`;
+   x64 Kestrel does not require an x86 payload.
 2. **File replacement:** the installer stages PE changes in `.new`, flushes and
    verifies them, moves the untouched original to `.orig`, and restores it if
    replacement fails. It patches API-query imports, adds missing export
@@ -641,8 +665,8 @@ The native C++ shim and the external C# package both provide headless window/mes
    a failed Docker build must not be published.
 3. **Process load:** processes that load a patched forwarder also load
    `nanoserver_sta_shim.dll`. The shim redirects API-query and delay-load slots
-   in `combase.dll`, `user32.dll`, `ole32.dll`, `gdi32.dll`, and `oleaut32.dll`.
-   The presence functions are `Shim_ApiSetQueryApiSetPresence` and
+   in `combase.dll`, `user32.dll`, `ole32.dll`, `gdi32.dll`, `oleaut32.dll`, and
+   `shcore.dll`. The presence functions are `Shim_ApiSetQueryApiSetPresence` and
    `Shim_ApiSetQueryApiSetPresenceEx`, not an unconditional replacement for
    every API namespace. Cache discovery is range-checked; a captured module is
    rewritten only when its enable state changes or a previous write failed.
@@ -764,12 +788,12 @@ Bringing a legacy 32-bit VB6 ActiveX/COM library onto Windows Nano Server 2025 w
 
 ### 7. Breakthrough #5: Running Legacy 32-Bit Visual C++ 10.0 / MFC (`mfc100u.dll`) & GDI+ (`gdiplus.dll`) Calculation Libraries & Redirecting Broken `shell32.dll` Forwarders
 
-Another major class of OEM engineering and HVAC calculation engines (such as the DBM heat exchanger calculation suite: `calcdll.dll`, `cmpdll.dll`, `cond.dll`, `evap.dll`, `gas.dll`, `hhsd.dll`, `liquidi.dll`) is compiled with **32-bit Visual C++ 10.0 (`VS 2010`) and dynamically linked against the Unicode Microsoft Foundation Classes (`mfc100u.dll` / `mfc100.dll`), ATL (`atl100.dll`), the VC++ 10.0 CRT (`msvcr100.dll` / `msvcp100.dll`), and GDI+ (`gdiplus.dll`)**.
+Another major class of OEM engineering and HVAC calculation engines (such as multi-DLL heat exchanger calculation suites) is compiled with **32-bit Visual C++ 10.0 (`VS 2010`) and dynamically linked against the Unicode Microsoft Foundation Classes (`mfc100u.dll` / `mfc100.dll`), ATL (`atl100.dll`), the VC++ 10.0 CRT (`msvcr100.dll` / `msvcp100.dll`), and GDI+ (`gdiplus.dll`)**.
 
-Even when these DLLs expose plain `__stdcall` C entry points (`SetPricePath`, `StartJob`) and perform purely numerical thermodynamic and pricing calculations, loading `mfc100u.dll` and `gdiplus.dll` inside Windows Nano Server 2025 hits three distinct OS-loader roadblocks:
+Even when these DLLs expose plain `__stdcall` C entry points and perform purely numerical thermodynamic and pricing calculations, loading `mfc100u.dll` and `gdiplus.dll` inside Windows Nano Server 2025 hits three distinct OS-loader roadblocks:
 
 1. **Missing 32-Bit VC++ 10.0, MFC 10.0, `msimg32.dll` & `gdiplus.dll` Runtimes in `SysWOW64` (Provisioned in Stage 1 of Multi-Stage Docker Builds):**
-   - Nano Server's `Microsoft.NanoServer.Datacenter.WOWSupport` package does not include the Visual C++ 2010 redistributable (`msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`), `msimg32.dll` (statically imported by `mfc100u.dll` for `AlphaBlend` / `TransparentBlt` / `GradientFill`), or `gdiplus.dll` (statically imported by `cmpdll.dll` and delay-loaded by `mfc100u.dll`).
+   - Nano Server's `Microsoft.NanoServer.Datacenter.WOWSupport` package does not include the Visual C++ 2010 redistributable (`msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`), `msimg32.dll` (statically imported by `mfc100u.dll` for `AlphaBlend` / `TransparentBlt` / `GradientFill`), or `gdiplus.dll` (statically imported by native calculation DLLs and delay-loaded by `mfc100u.dll`).
    - Rather than committing Microsoft redistributable DLLs into the Git repository, all five WoW64 Dockerfiles harvest these 8 32-bit DLLs into `C:\wow64_runtimes\` during Stage 1 (`FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer`):
      - `msvbvm60.dll` (`6.00.9848`) is downloaded directly from the Microsoft Symbol Server (`https://msdl.microsoft.com/download/symbols/msvbvm60.dll/5EA8E7BC15d000/msvbvm60.dll`).
      - `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, and `mfc100u.dll` (`10.0.40219.325`) are installed in the `installer` stage from the official Microsoft Visual C++ 2010 SP1 MFC Security Update redistributable (`KB2565063`, `vcredist_x86.exe /q /norestart`) and copied from `C:\Windows\SysWOW64\`.
@@ -782,6 +806,25 @@ Even when these DLLs expose plain `__stdcall` C entry points (`SetPricePath`, `S
    - Unlike `gdi32.dll` or `user32.dll` where missing symbols were simply omitted from `.edata`, Nano Server's `C:\Windows\SysWOW64\forwarders\shell32.dll` (and `System32\forwarders\shell32.dll`) **already contains** export entries for `SHGetPathFromIDListW`, `DragQueryFileW`, and `SHGetSpecialFolderLocation`—imported statically by `mfc100u.dll`.
    - However, those three export table entries are **PE forwarder strings** pointing to `windows.storage.dll.SHGetPathFromIDListW`, `windows.storage.dll.DragQueryFileW`, and `windows.storage.dll.SHGetSpecialFolderLocation`. Because `windows.storage.dll` is a desktop shell binary that does not exist on Nano Server, `ntdll!LdrpSnapModule` follows the forwarder string during `LoadLibraryExW("mfc100u.dll")` and aborts module loading with `ERROR_MOD_NOT_FOUND (126)` / `ERROR_PROC_NOT_FOUND (127)`!
    - **How `install_sta_shim.exe` Fixes Broken Forwarders:** We enhanced `PatchPeFileExports` and `VerifyPatchedPe` in `install_sta_shim.cpp` (`IsBrokenForwarderTarget`) so that when a required export already exists in a system forwarder DLL as a forwarder targeting a missing desktop DLL (`windows.storage.dll.*`), the export-table rebuilder **redirects that existing export entry in-place** to `nanoserver_sta_shim.<ExportName>` and removes `SHELL32` from `KnownDLLs`.
+
+### 8. Breakthrough #6: Running Legacy 32-Bit Embarcadero / Borland Delphi VCL Calculation DLLs (`FlatSB`, Headless Primary Monitor & Per-Monitor DPI)
+
+Many industrial fan, pump, and heat-exchanger selection engines are compiled with **32-bit Embarcadero / Borland Delphi** and link the **Visual Component Library (`System.Classes`, `Vcl.Forms`, `Vcl.Controls`, `Vcl.Graphics`, `Winapi.FlatSB`, `Winapi.MMSystem`)**—often encapsulating their database/curve engine inside a hidden `TDataModule` or `TForm` subclass (`TCustomForm`).
+
+Running these Delphi VCL DLLs inside Windows Nano Server 2025 exposed two distinct failure layers:
+
+1. **22 Missing Static & Delay-Loaded VCL PE Exports (`gdi32.dll`, `user32.dll`, `ole32.dll`, `comctl32.dll`, `winmm.dll`):**
+   - Delphi's `Vcl.Graphics`, `Vcl.Controls`, `Winapi.FlatSB`, and `Winapi.MMSystem` units statically import or `GetProcAddress`-probe:
+     - **`gdi32.dll` (4 exports):** `CopyEnhMetaFileW`, `GetEnhMetaFileDescriptionA`, `GetEnhMetaFileDescriptionW`, `GetTextCharacterExtra`.
+     - **`user32.dll` (3 exports):** `LoadCursorFromFileA`, `LoadCursorFromFileW`, `SetGestureConfig`.
+     - **`ole32.dll` (1 export):** `IsEqualGUID`.
+     - **`comctl32.dll` (12 Flat Scroll Bar exports):** `InitializeFlatSB`, `UninitializeFlatSB`, `FlatSB_EnableScrollBar`, `FlatSB_ShowScrollBar`, `FlatSB_GetScrollRange`, `FlatSB_GetScrollInfo`, `FlatSB_GetScrollPos`, `FlatSB_GetScrollProp`, `FlatSB_SetScrollPos`, `FlatSB_SetScrollInfo`, `FlatSB_SetScrollRange`, `FlatSB_SetScrollProp`.
+     - **`winmm.dll` (2 exports):** `sndPlaySoundA`, `sndPlaySoundW` (alongside `PlaySoundA`).
+   - We added all 22 exports to `nanoserver_sta_shim.dll` and `install_sta_shim.exe` and extended `install_sta_shim.exe` to preflight, patch, and verify `winmm.dll` in `System32\forwarders` and `SysWOW64\forwarders` (copying the patched forwarder to `System32\winmm.dll` and `SysWOW64\winmm.dll`).
+2. **Headless Primary Monitor & Per-Monitor 96-DPI Shims (`0xC0000094 STATUS_INTEGER_DIVIDE_BY_ZERO` Fix):**
+   - When a Delphi VCL library initializes `Application` / `Screen` (`TScreen.GetMonitors`) or instantiates a `TCustomForm` subclass, VCL calls `user32!EnumDisplayMonitors`, `MonitorFromWindow`, `MonitorFromPoint`, `GetMonitorInfoW`, `GetSystemMetricsForDpi`, and `SHCore.dll!GetDpiForMonitor` (which delay-loads `ext-ms-win-rtcore-ntuser-dpi-l1-1-0.dll!GetDpiForMonitorInternal` and `ext-ms-win-rtcore-ntuser-sysparams-l1-1-0.dll!MonitorFromWindow`).
+   - On stock Nano Server, `EnumDisplayMonitors` yields zero monitors (`Screen.Monitors.Count == 0`) and `GetDpiForMonitor` leaves `FCurrentPPI = 0`. When `TCustomForm.ReadState` / `ScaleForPPI` computes `MulDiv(..., FCurrentPPI)` via signed integer division (`idiv ecx`), `ECX == 0` triggers a fatal hardware exception **`0xC0000094` (`STATUS_INTEGER_DIVIDE_BY_ZERO`)**.
+   - **Solution:** `nanoserver_sta_shim.dll` now implements 11 display-monitor and DPI exports providing a synthetic `1024x768` primary monitor (`HMONITOR = 0x00010001`, work area `1024x746`, device `"\\.\DISPLAY1"`, `MONITORINFOF_PRIMARY`) across `EnumDisplayMonitors`, `MonitorFromPoint`, `MonitorFromRect`, `MonitorFromWindow`, `GetMonitorInfoW`, and `GetMonitorInfoA`, returns `96x96` DPI from `GetSystemMetricsForDpi`, `GetDpiForMonitor`, `GetDpiForMonitorInternal`, `GetDpiForSystem`, and `GetDpiForWindow`, and hooks `SHCore.dll`'s delay-load tables automatically when `SHCore.dll` loads.
 
 ---
 
