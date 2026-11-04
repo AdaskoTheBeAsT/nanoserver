@@ -1,5 +1,6 @@
 # escape=`
-FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
+ARG NANO_BASE=mcr.microsoft.com/windows/nanoserver:ltsc2025
+FROM ${NANO_BASE}
 
 ARG DOTNET_VERSION=10.0.14
 
