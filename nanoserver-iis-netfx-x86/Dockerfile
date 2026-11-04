@@ -1,4 +1,5 @@
 # escape=`
+ARG NANO_BASE=mcr.microsoft.com/windows/nanoserver:ltsc2025
 FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer
 
 SHELL ["cmd", "/S", "/C"]
@@ -26,7 +27,7 @@ RUN mkdir C:\wow64_runtimes `
     && (for %F in (msvcr100.dll msvcp100.dll atl100.dll mfc100.dll mfc100u.dll msimg32.dll) do copy /Y "C:\Windows\SysWOW64\%F" "C:\wow64_runtimes\%F" >nul) `
     && (for /D %G in ("C:\Windows\WinSxS\x86_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.*") do copy /Y "%G\GdiPlus.dll" "C:\wow64_runtimes\gdiplus.dll" >nul)
 
-FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
+FROM ${NANO_BASE}
 
 SHELL ["cmd", "/S", "/C"]
 
