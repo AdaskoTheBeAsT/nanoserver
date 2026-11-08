@@ -1,4 +1,6 @@
 EXPORTS
+    _hread=Shim_hread
+    QueryActCtxW=Shim_QueryActCtxW
     ApiSetQueryApiSetPresence=Shim_ApiSetQueryApiSetPresence
     ApiSetQueryApiSetPresenceEx=Shim_ApiSetQueryApiSetPresenceEx
     ResolveDelayLoadedAPI=Shim_ResolveDelayLoadedAPI

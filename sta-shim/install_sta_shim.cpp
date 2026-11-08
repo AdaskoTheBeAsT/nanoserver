@@ -710,7 +710,8 @@ const std::vector<const char*>& RequiredExports(const std::wstring& name) {
     return kNoExports;
 }
 
-bool VerifyPatchedPe(const wchar_t* path, const std::vector<const char*>& requiredExports) {
+bool VerifyPatchedPe(const wchar_t* path, const std::vector<const char*>& requiredExports,
+                     bool requireShimImport = true) {
     std::vector<BYTE> bytes;
     if (!ReadFileBuffer(path, bytes)) return false;
     auto* nt = GetPeHeaders(bytes);
@@ -728,7 +729,7 @@ bool VerifyPatchedPe(const wchar_t* path, const std::vector<const char*>& requir
         foundImport = foundImport || _stricmp(name.c_str(), "nanoserver_sta_shim.dll") == 0;
         offset += sizeof(IMAGE_IMPORT_DESCRIPTOR);
     }
-    if (!foundImport) return false;
+    if (requireShimImport && !foundImport) return false;
     if (requiredExports.empty()) return true;
     DWORD exportOffset = RvaToOffset(nt, nt->FileHeader.NumberOfSections,
         directories[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
@@ -780,6 +781,7 @@ bool PreflightPe(const std::wstring& path, WORD machine) {
 
 bool PreflightArchitecture(const std::wstring& payload, const std::wstring& systemDirectory, WORD machine) {
     if (!PreflightPe(payload, machine)) return false;
+    if (!PreflightPe(systemDirectory + L"\\forwarders\\kernel32.dll", machine)) return false;
     for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll"}) {
         if (!PreflightPe(systemDirectory + L"\\forwarders\\" + name, machine)) return false;
     }
@@ -800,6 +802,12 @@ bool InstallArchitecture(const std::wstring& payload, const std::wstring& system
             return false;
         }
     }
+    // Patch only lazy compatibility forwarders. Do not inject a shim import into kernel32,
+    // create a new root kernel32.dll, or alter KnownDLLs for this boot-critical DLL.
+    std::wstring kernel32 = systemDirectory + L"\\forwarders\\kernel32.dll";
+    const std::vector<const char*> compatibilityExports = {"_hread", "QueryActCtxW"};
+    if (!PatchPeFileExports(kernel32.c_str(), compatibilityExports) ||
+        !VerifyPatchedPe(kernel32.c_str(), compatibilityExports, false)) return false;
     wprintf(L"[OK] Installed and verified shim in %s\n", systemDirectory.c_str());
     return true;
 }

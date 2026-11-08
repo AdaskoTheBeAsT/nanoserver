@@ -2,6 +2,8 @@
 
 **Run the "impossible" .NET workloads on Windows Nano Server 2025 (`ltsc2025`).**
 
+Current repository revision: **`1.7.0`** (not yet published).
+
 This repository provides community-maintained, reusable **Nano Server 2025 base images** (and sample `HealthApi` apps) published to a single unified Docker Hub repository (**`adaskothebeast/nanoserver`**) for the exact .NET scenarios where Microsoft's official images normally force you onto massive **5–8 GB Windows Server Core** containers:
 
 - ⚡ **32-bit (`x86`) & 64-bit (`x64`) ASP.NET Core 10** — Self-hosted **Kestrel** (with built-in COM STA & Win32 message-queue shim) & **IIS 10 (`OutOfProcess` / `InProcess`)**
@@ -64,6 +66,51 @@ Out of the box, `mcr.microsoft.com/windows/nanoserver:ltsc2025` **cannot** run a
 ---
 
 ## 📦 All 6 Flavours at a Glance
+
+### Legacy calculation compatibility (1.7.0)
+
+The source shim now supplies the missing `kernel32!_hread` export used by PowerBASIC,
+and routes `RegisterWindowMessageA/W`, `MsgWaitForMultipleObjects`, and `CreateRectRgn`
+through the existing headless implementations. `_hread` uses real file I/O, including
+reads larger than 64 KiB. `QueryActCtxW` delegates to KernelBase and converts only
+`ERROR_INVALID_FUNCTION` to `ERROR_CALL_NOT_IMPLEMENTED`, allowing MFC's existing
+unsupported-SxS fallback. It does not fabricate an activation context. The installer
+patches only lazy compatibility exports in the existing `forwarders\kernel32.dll`;
+it does not inject a shim import into kernel32,
+create a root kernel32 DLL, or change kernel32 KnownDLL registration.
+
+Registered messages share the bounded, process-local clipboard-format table. This
+does not implement cross-process window messaging. Rectangle regions follow the
+existing synthetic, non-rendering GDI convention, not geometric region operations.
+`CreatePalette`, `SelectPalette`, and `GetDIBits` likewise support headless startup:
+bitmap reads return blank pixels, not rendered images.
+
+Current-thread `WH_CBT` creation hooks support ANSI/Unicode callbacks, chaining,
+creation veto, and MFC attachment before `WM_NCCREATE`. Global/cross-thread hooks,
+other CBT events, and hook-driven geometry changes are not implemented.
+`CreateDialogIndirectParamA/W` parses standard and extended templates, creates
+child controls, stores `DWLP_DLGPROC`, and dispatches `WM_INITDIALOG` after creation.
+`DefDlgProcA/W`, `GetDlgItem`, `GetDlgCtrlID`, and `MapDialogRect` support this
+modeless lifecycle. Layout uses fixed 8-by-16 headless font metrics; menus, modal
+dialog loops, full control behavior, and interactive rendering are not provided.
+
+Real-import native regressions cover both dialog formats and ANSI/Unicode entry
+points, CBT subclassing, creation data, message results, child cleanup, and invalid
+template bounds. The same fixtures run against Windows and the installed Nano shim
+in x86 and x64 processes. Plate/wheel heat-exchanger and fan duty-point calculations
+are validated by the consuming application's container smoke suite, not by
+synthetic shim return values alone.
+
+Rebuild the binaries explicitly before building an image, even if installer binaries
+already exist. For example, from the repository root:
+
+```powershell
+.\sta-shim\build_shim.ps1
+docker build -t ahu-nano-compat:local .\nanoserver-aspnet-x86
+```
+
+The `1.7.0` changes are prepared locally; the published `v1.6.0` image does not
+contain them. Use a separate local image tag when validating applications.
 
 *(Note: While Microsoft publishes `mcr.microsoft.com/dotnet/aspnet:10.0-nanoserver-ltsc2025` for 64-bit Kestrel, it lacks COM Single-Threaded Apartment (`STA`) and Win32 message-queue support. `nanoserver-aspnet-x64` provides an ultra-slim **697 MB** 64-bit Kestrel image with the native STA & message-queue shim pre-installed.)*
 
@@ -161,50 +208,63 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.6.0`, `-v1.6`, `-v1`).
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.7.0`, `-v1.7`, `-v1`). The `1.7.0` tag scheme below is prepared locally; this change does not publish images.
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.6.0, -v1.6, and -v1
-.\set-version.ps1 -Version 1.6.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v1.7.0, -v1.7, and -v1
+.\set-version.ps1 -Version 1.7.0
 
 # Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.6.0 -DotNetVersion 10.0.14
+.\set-version.ps1 -Version 1.7.0 -DotNetVersion 10.0.14
 ```
 
 - **ASP.NET Core 10 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.6.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.6`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.7.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.7`
   - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
 - **ASP.NET Core 10 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.6.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.6`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.7.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.7`
   - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.6.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.6`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.7.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.7`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.6.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.6`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.7.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.7`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.6.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.6`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.7.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.7`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.6.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.6`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.7.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.7`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
 
 ---
+
+## What's New in `v1.7.0` (Not Yet Published)
+
+Container revision **`1.7.0`** adds legacy file reads, message waits, registered
+messages, and headless region/palette/bitmap compatibility. MFC startup can use its
+existing unsupported-SxS fallback and attach windows through current-thread CBT
+creation hooks. Standard and extended modeless dialog templates support child
+creation, initialization, message results, and cleanup without a desktop renderer.
+
+Native regression fixtures cover ANSI/Unicode entry points and both pointer widths
+against Windows and the installed Nano shim. Full activation-context emulation,
+modal dialog loops, and interactive controls remain out of scope. See
+[`CHANGELOG.md`](./CHANGELOG.md) for the complete release notes.
 
 ## ✨ What's New in `v1.6.0`
 

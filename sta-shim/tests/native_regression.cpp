@@ -569,14 +569,14 @@ void TestUserObjectsAndClipboard(bool shim) {
     Check("N05_format_range_and_reuse", first >= 0xC000 && first <= 0xFFFF &&
         RegisterClipboardFormatW(L"RTRange_0") == first);
     if (!shim) return; // The real clipboard atom table is shared with other processes.
-    Check("N05_first_format", first == 0xC000);
+    Check("N05_first_format", first == RegisterWindowMessageW(L"NativeShimLegacyCalculationMessage") + 1);
     bool bounded = true;
     UINT last = first;
-    for (UINT i = 1; i < 0x4000; ++i) {
+    for (UINT i = 1; i < 0x10000 - first; ++i) {
         wchar_t name[40]{};
         swprintf_s(name, L"RTRange_%u", i);
         last = RegisterClipboardFormatW(name);
-        if (last != 0xC000 + i) { bounded = false; break; }
+        if (last != first + i) { bounded = false; break; }
     }
     SetLastError(0);
     UINT exhausted = RegisterClipboardFormatW(L"RTRange_exhausted");
@@ -793,6 +793,334 @@ void TestRouting(bool requireShim) {
     }
 }
 
+std::vector<int> cbtOrder;
+bool cbtCreated = false;
+
+LRESULT CALLBACK CbtWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NCCREATE) {
+        cbtOrder.push_back(3);
+        cbtCreated = GetWindowLongPtrW(window, GWLP_USERDATA) == 123;
+        return TRUE;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK CbtAnsiProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HCBT_CREATEWND) {
+        auto* creation = reinterpret_cast<CBT_CREATEWNDA*>(lParam);
+        if (IS_INTRESOURCE(creation->lpcs->lpszClass) ||
+            std::strcmp(creation->lpcs->lpszClass, "RTCBTWindow") != 0)
+            return CallNextHookEx(nullptr, code, wParam, lParam);
+        Check("CBT_ANSI_creation_context", creation->lpcs->lpszClass &&
+            std::strcmp(creation->lpcs->lpszClass, "RTCBTWindow") == 0 &&
+            creation->lpcs->lpCreateParams == reinterpret_cast<void*>(123));
+        cbtOrder.push_back(1);
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+LRESULT CALLBACK CbtWideProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HCBT_CREATEWND) {
+        auto* creation = reinterpret_cast<CBT_CREATEWNDW*>(lParam);
+        if (IS_INTRESOURCE(creation->lpcs->lpszClass) ||
+            std::wcscmp(creation->lpcs->lpszClass, L"RTCBTWindow") != 0)
+            return CallNextHookEx(nullptr, code, wParam, lParam);
+        Check("CBT_unicode_creation_context", creation->lpcs->lpszClass &&
+            std::wcscmp(creation->lpcs->lpszClass, L"RTCBTWindow") == 0);
+        cbtOrder.push_back(2);
+        HWND window = reinterpret_cast<HWND>(wParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, 123);
+        SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(CbtWindowProc));
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+LRESULT CALLBACK CbtCancelProc(int code, WPARAM wParam, LPARAM lParam) {
+    return code == HCBT_CREATEWND ? 1 : CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+void TestCbtWindowAttachment() {
+    WNDCLASSEXW cls{};
+    cls.cbSize = sizeof(cls);
+    cls.hInstance = instance;
+    cls.lpfnWndProc = BasicProc;
+    cls.lpszClassName = L"RTCBTWindow";
+    Require(RegisterClassExW(&cls) != 0, "register CBT window");
+    HHOOK ansi = SetWindowsHookExA(WH_CBT, CbtAnsiProc, nullptr, GetCurrentThreadId());
+    HHOOK wide = SetWindowsHookExW(WH_CBT, CbtWideProc, nullptr, GetCurrentThreadId());
+    Require(ansi && wide, "install CBT hooks");
+    HWND window = CreateWindowExW(0, cls.lpszClassName, L"", 0, 0, 0, 16, 16,
+        nullptr, nullptr, instance, reinterpret_cast<void*>(123));
+    Check("CBT_attach_before_NCCREATE", window != nullptr && cbtCreated &&
+        cbtOrder == std::vector<int>({2, 1, 3}));
+    if (window) DestroyWindow(window);
+    UnhookWindowsHookEx(wide);
+    UnhookWindowsHookEx(ansi);
+    cbtOrder.clear();
+    cbtCreated = false;
+    HHOOK cancel = SetWindowsHookExW(WH_CBT, CbtCancelProc, nullptr, GetCurrentThreadId());
+    window = CreateWindowExW(0, cls.lpszClassName, L"", 0, 0, 0, 16, 16,
+        nullptr, nullptr, instance, nullptr);
+    Check("CBT_creation_veto", window == nullptr && !cbtCreated);
+    if (window) DestroyWindow(window);
+    UnhookWindowsHookEx(cancel);
+    window = CreateWindowExW(0, cls.lpszClassName, L"", 0, 0, 0, 16, 16,
+        nullptr, nullptr, instance, nullptr);
+    Check("CBT_unhook", window != nullptr && cbtOrder.empty() && !cbtCreated);
+    if (window) DestroyWindow(window);
+    UnregisterClassW(cls.lpszClassName, instance);
+}
+
+void TestLegacyCalculationImports() {
+    ACTIVATION_CONTEXT_BASIC_INFORMATION context{};
+    SIZE_T required = 0;
+    SetLastError(0);
+    BOOL query = QueryActCtxW(0x80000010u, &instance, nullptr, ActivationContextBasicInformation,
+        &context, sizeof(context), &required);
+    Check("MFC_activation_query_or_supported_fallback", query ||
+        (runningShim && GetLastError() == ERROR_CALL_NOT_IMPLEMENTED));
+    UINT registered = RegisterWindowMessageA("NativeShimLegacyCalculationMessage");
+    Check("legacy_registered_message_AW", registered >= 0xC000 && registered <= 0xFFFF &&
+        registered == RegisterWindowMessageW(L"NativeShimLegacyCalculationMessage"));
+    Check("legacy_message_wait_timeout",
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 0, QS_ALLINPUT) == WAIT_TIMEOUT);
+    HANDLE events[] = {CreateEventW(nullptr, FALSE, TRUE, nullptr), CreateEventW(nullptr, FALSE, FALSE, nullptr)};
+    Require(events[0] && events[1], "legacy wait events");
+    Check("legacy_message_wait_all_timeout",
+        MsgWaitForMultipleObjects(2, events, TRUE, 0, QS_ALLINPUT) == WAIT_TIMEOUT);
+    SetEvent(events[1]);
+    Check("legacy_message_wait_all_requires_input",
+        MsgWaitForMultipleObjects(2, events, TRUE, 0, QS_ALLINPUT) == WAIT_TIMEOUT);
+    Require(PostThreadMessageW(GetCurrentThreadId(), WM_APP + 37, 0, 0), "legacy wait input");
+    Check("legacy_message_wait_all_preserves_signals",
+        MsgWaitForMultipleObjects(2, events, TRUE, 0, QS_ALLINPUT) == WAIT_OBJECT_0);
+    MSG legacyMessage{};
+    Require(PeekMessageW(&legacyMessage, nullptr, WM_APP + 37, WM_APP + 37, PM_REMOVE), "remove legacy wait input");
+    CloseHandle(events[0]);
+    CloseHandle(events[1]);
+    HRGN region = CreateRectRgn(0, 0, 10, 10);
+    Check("legacy_rect_region", region != nullptr && DeleteObject(region));
+    HDC dc = GetDC(nullptr);
+    Require(dc != nullptr, "legacy bitmap DC");
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, 16, 16);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    Check("legacy_DIB_header", GetDIBits(dc, bitmap, 0, 0, nullptr, &info, DIB_RGB_COLORS) != 0 &&
+        info.bmiHeader.biWidth == 16 && info.bmiHeader.biHeight == 16 && info.bmiHeader.biPlanes == 1);
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    BYTE pixels[16 * 16 * 4]{};
+    Check("legacy_DIB_scanlines", GetDIBits(dc, bitmap, 0, 16, pixels, &info, DIB_RGB_COLORS) == 16);
+    HBITMAP smallBitmap = CreateCompatibleBitmap(dc, 1, 1);
+    info.bmiHeader.biWidth = 1;
+    info.bmiHeader.biHeight = 1;
+    info.bmiHeader.biSizeImage = 4;
+    BYTE guardedPixels[12];
+    memset(guardedPixels, 0xCD, sizeof(guardedPixels));
+    Check("legacy_DIB_small_buffer", GetDIBits(dc, smallBitmap, 0, 1, guardedPixels + 4, &info, DIB_RGB_COLORS) == 1 &&
+        guardedPixels[0] == 0xCD && guardedPixels[3] == 0xCD && guardedPixels[8] == 0xCD && guardedPixels[11] == 0xCD);
+    DeleteObject(smallBitmap);
+    LOGPALETTE logical{};
+    logical.palVersion = 0x300;
+    logical.palNumEntries = 1;
+    HPALETTE palette = CreatePalette(&logical);
+    Check("legacy_palette", palette != nullptr && SelectPalette(dc, palette, FALSE) != nullptr);
+    DeleteObject(palette);
+    DeleteObject(bitmap);
+    ReleaseDC(nullptr, dc);
+
+    auto read = reinterpret_cast<LONG(WINAPI*)(HFILE, LPVOID, LONG)>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "_hread"));
+    Check("legacy_hread_export", read != nullptr);
+    if (!read) return;
+    wchar_t directory[MAX_PATH]{}, path[MAX_PATH]{};
+    Require(GetTempPathW(MAX_PATH, directory) != 0, "temp directory");
+    Require(GetTempFileNameW(directory, L"nsh", 0, path) != 0, "temp file");
+    HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    Require(file != INVALID_HANDLE_VALUE, "open legacy read fixture");
+    std::vector<BYTE> expected(131072), actual(expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) expected[i] = static_cast<BYTE>(i % 251);
+    DWORD written = 0;
+    Require(WriteFile(file, expected.data(), static_cast<DWORD>(expected.size()), &written, nullptr) &&
+        written == expected.size(), "write legacy read fixture");
+    Require(SetFilePointer(file, 0, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER, "rewind legacy read fixture");
+    HFILE legacyFile = static_cast<HFILE>(reinterpret_cast<INT_PTR>(file));
+    Check("legacy_hread_over_64KiB",
+        read(legacyFile, actual.data(), static_cast<LONG>(actual.size())) == actual.size() && actual == expected);
+    Check("legacy_hread_eof", read(legacyFile, actual.data(), 1) == 0);
+    CloseHandle(file);
+    SetLastError(0);
+    LONG invalid = read(HFILE_ERROR, actual.data(), 1);
+    Check("legacy_hread_invalid_handle", invalid == HFILE_ERROR && GetLastError() == ERROR_INVALID_HANDLE);
+}
+
+WNDPROC dialogPrevious = nullptr;
+HWND dialogAttached = nullptr;
+bool dialogAttachedBeforeCreate = false;
+bool dialogInitialized = false;
+bool dialogDataReceived = false;
+bool dialogButtonTitle = false;
+bool extendedDialog = false;
+int dialogDestroyed = 0;
+
+LRESULT CALLBACK DialogSubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NCCREATE)
+        dialogAttachedBeforeCreate = GetWindowLongPtrW(window, GWLP_USERDATA) == 0x4455;
+    if (message == WM_NCDESTROY) ++dialogDestroyed;
+    return CallWindowProcW(dialogPrevious, window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK DialogAttachmentHook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HCBT_CREATEWND) {
+        HWND window = reinterpret_cast<HWND>(wParam);
+        auto* creation = reinterpret_cast<CBT_CREATEWNDW*>(lParam);
+        wchar_t name[32]{};
+        if (GetClassNameW(window, name, 32) && std::wcscmp(name, L"#32770") == 0) {
+            dialogAttached = window;
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0x4455);
+            dialogPrevious = reinterpret_cast<WNDPROC>(
+                SetWindowLongPtrW(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DialogSubclass)));
+        } else if (creation->lpcs->hwndParent == dialogAttached &&
+            reinterpret_cast<INT_PTR>(creation->lpcs->hMenu) == 1) {
+            dialogButtonTitle = creation->lpcs->lpszName && !IS_INTRESOURCE(creation->lpcs->lpszName) &&
+                std::wcscmp(creation->lpcs->lpszName, L"OK") == 0;
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+LRESULT CALLBACK DialogDataProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_CREATE) {
+        const auto* creation = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        const auto* data = static_cast<const WORD*>(creation->lpCreateParams);
+        if (data) std::printf("OBSERVE dialog_data extended=%d words=%04x,%04x,%04x\n",
+            extendedDialog, data[0], data[1], data[2]);
+        // Observed through ordinary user32 imports on both Windows architectures.
+        dialogDataReceived = data && data[0] == 8 && data[1] == 0x1234 && data[2] == 0x5678;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+INT_PTR CALLBACK DialogProc(HWND window, UINT message, WPARAM, LPARAM lParam) {
+    if (message == WM_INITDIALOG) {
+        HWND button = GetDlgItem(window, 1);
+        HWND data = GetDlgItem(window, 101);
+        std::printf("OBSERVE dialog_init parameter=%llx button=%d data=%d attached=%d creation_data=%d\n",
+            static_cast<unsigned long long>(lParam), !!button, !!data,
+            dialogAttachedBeforeCreate, dialogDataReceived);
+        dialogInitialized = lParam == 0x8877 && button && data &&
+            GetParent(button) == window && GetDlgCtrlID(button) == 1 &&
+            dialogButtonTitle &&
+            dialogAttachedBeforeCreate && dialogDataReceived;
+        return FALSE;
+    }
+    if (message == testMessage) {
+        SetWindowLongPtrW(window, DWLP_MSGRESULT, 0x9876);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+std::vector<WORD> DialogTemplate(bool extended, bool missingClass = false) {
+    std::vector<WORD> words;
+    auto dword = [&](DWORD value) {
+        words.push_back(static_cast<WORD>(value));
+        words.push_back(static_cast<WORD>(value >> 16));
+    };
+    auto text = [&](const wchar_t* value) {
+        do { words.push_back(static_cast<WORD>(*value)); } while (*value++);
+    };
+    auto coordinates = [&] {
+        words.push_back(1); words.push_back(2); words.push_back(80); words.push_back(60);
+    };
+    if (extended) {
+        words.push_back(1); words.push_back(0xFFFF); dword(0); dword(0);
+        dword(WS_POPUP | DS_SETFONT);
+    } else { dword(WS_POPUP | DS_SETFONT); dword(0); }
+    words.push_back(4);
+    coordinates();
+    words.push_back(0); words.push_back(0); text(L"NativeDialog");
+    words.push_back(9);
+    if (extended) { words.push_back(FW_NORMAL); words.push_back(DEFAULT_CHARSET << 8); }
+    text(L"Segoe UI");
+    for (WORD id = 0; id < 4; ++id) {
+        if (words.size() & 1) words.push_back(0); // DWORD alignment
+        DWORD style = WS_CHILD | (id == 0 ? WS_TABSTOP : 0) | (id == 3 ? SS_ICON : 0);
+        if (extended) { dword(0); dword(0); dword(style); }
+        else { dword(style); dword(0); }
+        coordinates();
+        DWORD controlId = id == 0 ? 1 : 100 + id;
+        if (extended) dword(controlId); else words.push_back(static_cast<WORD>(controlId));
+        if (missingClass && id == 2) text(L"RTMissingDialogControl");
+        else if (id == 1) text(L"RTDialogData");
+        else { words.push_back(0xFFFF); words.push_back(id == 0 ? 0x80 : 0x82); }
+        if (id == 3) { words.push_back(0xFFFF); words.push_back(1); }
+        else text(id == 0 ? L"OK" : L"Data");
+        if (id == 1) {
+            words.push_back(8);
+            words.push_back(0x1234); words.push_back(0x5678);
+            words.push_back(0x9ABC); words.push_back(0xDEF0);
+        } else words.push_back(0);
+    }
+    return words;
+}
+
+void TestModelessDialogs() {
+    Require(Register(L"RTDialogData", DialogDataProc) != 0, "register dialog data control");
+    for (bool extended : {false, true}) for (bool ansi : {false, true}) {
+        extendedDialog = extended;
+        dialogAttached = nullptr;
+        dialogAttachedBeforeCreate = dialogInitialized = dialogDataReceived = dialogButtonTitle = false;
+        dialogDestroyed = 0;
+        auto words = DialogTemplate(extended);
+        HHOOK hook = SetWindowsHookExW(WH_CBT, DialogAttachmentHook, nullptr, GetCurrentThreadId());
+        Require(hook != nullptr, "install dialog attachment hook");
+        auto create = ansi ? CreateDialogIndirectParamA : CreateDialogIndirectParamW;
+        HWND window = create(instance, reinterpret_cast<LPCDLGTEMPLATE>(words.data()),
+            nullptr, DialogProc, 0x8877);
+        UnhookWindowsHookEx(hook);
+        std::printf("OBSERVE dialog extended=%d ansi=%d init=%d data=%d err=%lu\n",
+            extended, ansi, dialogInitialized, dialogDataReceived, GetLastError());
+        Check("dialog_template_controls_and_CBT_attachment", window && window == dialogAttached && dialogInitialized);
+        if (window) {
+            auto getLong = ansi ? GetWindowLongPtrA : GetWindowLongPtrW;
+            Check("dialog_extra_bytes_and_message_result", SendMessageW(window, testMessage, 0, 0) == 0x9876 &&
+                getLong(window, DWLP_DLGPROC) == reinterpret_cast<LONG_PTR>(DialogProc));
+            Check("dialog_default_proc_AW", DefDlgProcW(window, testMessage, 0, 0) == 0x9876 &&
+                DefDlgProcA(window, testMessage, 0, 0) == 0x9876);
+            RECT rect{0, 0, 4, 8};
+            Check("dialog_unit_mapping", MapDialogRect(window, &rect) && rect.right > 0 && rect.bottom > 0);
+            HWND child = GetDlgItem(window, 101);
+            DestroyWindow(window);
+            Check("dialog_destroy_cleans_children", dialogDestroyed == 1 && !IsWindow(window) && !IsWindow(child));
+        }
+        words = DialogTemplate(extended, true);
+        dialogAttached = nullptr;
+        hook = SetWindowsHookExW(WH_CBT, DialogAttachmentHook, nullptr, GetCurrentThreadId());
+        window = create(instance, reinterpret_cast<LPCDLGTEMPLATE>(words.data()), nullptr, DialogProc, 0x8877);
+        UnhookWindowsHookEx(hook);
+        Check("dialog_failed_control_cleans_partial_dialog", !window && dialogAttached && !IsWindow(dialogAttached));
+        if (window) DestroyWindow(window);
+    }
+    if (runningShim) {
+        SetLastError(0);
+        Check("dialog_null_template_rejected", !CreateDialogIndirectParamW(instance, nullptr, nullptr, DialogProc, 0) &&
+            GetLastError() == ERROR_INVALID_DATA);
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        auto memory = static_cast<BYTE*>(VirtualAlloc(nullptr, system.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        Require(memory != nullptr, "allocate truncated dialog template");
+        auto truncated = reinterpret_cast<LPCDLGTEMPLATE>(memory + system.dwPageSize - 2);
+        SetLastError(0);
+        Check("dialog_truncated_template_rejected", !CreateDialogIndirectParamW(instance, truncated, nullptr, DialogProc, 0) &&
+            GetLastError() == ERROR_INVALID_DATA);
+        VirtualFree(memory, 0, MEM_RELEASE);
+    }
+    UnregisterClassW(L"RTDialogData", instance);
+    Drain();
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
@@ -806,6 +1134,9 @@ int wmain(int argc, wchar_t* argv[]) {
         }
     });
     std::printf("Native real-import regression bits=%zu requireShim=%d\n", sizeof(void*) * 8, requireShim);
+    TestLegacyCalculationImports();
+    TestCbtWindowAttachment();
+    TestModelessDialogs();
     Require(Register(L"RTBasic") != 0, "register basic");
     TestLifecycleAndExtraBytes();
     TestClasses();

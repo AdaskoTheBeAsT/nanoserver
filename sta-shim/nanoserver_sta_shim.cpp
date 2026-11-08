@@ -89,6 +89,7 @@ struct ModuleHookState {
 };
 
 struct WindowClassEntry {
+    bool Ansi = false;
     ATOM Atom = 0;
     std::wstring ClassName;
     std::string ClassNameA;
@@ -107,6 +108,7 @@ struct WindowClassEntry {
 };
 
 struct WindowEntry {
+    bool Ansi = false;
     HWND HWnd = nullptr;
     DWORD ThreadId = 0;
     WNDPROC WndProc = nullptr;
@@ -182,6 +184,30 @@ struct ClipboardFormatEntry {
     std::wstring Name;
 };
 
+struct CbtHookEntry {
+    HHOOK Handle = nullptr;
+    DWORD ThreadId = 0;
+    HOOKPROC Proc = nullptr;
+    bool Ansi = false;
+};
+
+struct CbtHookCall {
+    std::vector<CbtHookEntry> Hooks;
+    size_t Next = 0;
+    LPARAM AnsiParam = 0;
+    LPARAM WideParam = 0;
+};
+
+thread_local CbtHookCall* g_CurrentCbtCall = nullptr;
+
+class ScopedCbtCall {
+public:
+    explicit ScopedCbtCall(CbtHookCall& call) : Previous(g_CurrentCbtCall) { g_CurrentCbtCall = &call; }
+    ~ScopedCbtCall() { g_CurrentCbtCall = Previous; }
+private:
+    CbtHookCall* Previous;
+};
+
 CRITICAL_SECTION g_HookLock;
 CRITICAL_SECTION g_WindowLock;
 INIT_ONCE g_LocksOnce = INIT_ONCE_STATIC_INIT;
@@ -193,12 +219,14 @@ std::vector<WindowClassEntry> g_WindowClasses;
 std::vector<WindowEntry> g_Windows;
 std::vector<std::shared_ptr<ThreadMessageQueue>> g_ThreadQueues;
 std::vector<ClipboardFormatEntry> g_ClipboardFormats;
+std::vector<CbtHookEntry> g_CbtHooks;
 
 std::bitset<0x4000> g_ClassAtoms;
 UINT g_NextAtom = 0;
 LONG g_NextHwnd = 0x10000;
 LONG g_NextTimerId = 0x3000;
 LONG g_NextClipboardFormat = 0xC000;
+LONG g_NextHook = 0x50000;
 
 ApiSetQueryApiSetPresenceFn g_OrigPresence = nullptr;
 ApiSetQueryApiSetPresenceExFn g_OrigPresenceEx = nullptr;
@@ -477,6 +505,8 @@ VOID CALLBACK OnQueueThreadExit(PVOID value) {
         queue->Timers.clear();
         g_Windows.erase(std::remove_if(g_Windows.begin(), g_Windows.end(),
             [&queue](const WindowEntry& window) { return window.ThreadId == queue->ThreadId; }), g_Windows.end());
+        g_CbtHooks.erase(std::remove_if(g_CbtHooks.begin(), g_CbtHooks.end(),
+            [&queue](const CbtHookEntry& hook) { return hook.ThreadId == queue->ThreadId; }), g_CbtHooks.end());
         g_ThreadQueues.erase(std::remove(g_ThreadQueues.begin(), g_ThreadQueues.end(), queue), g_ThreadQueues.end());
         QueueChangedLocked(*queue);
     }
@@ -647,6 +677,7 @@ bool TryDequeueMessageLocked(ThreadMessageQueue& queue, HWND filterWindow,
 }
 
 LRESULT WINAPI Shim_DefWindowProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT WINAPI Shim_DefDlgProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 BOOL WINAPI Shim_DestroyWindow(HWND hWnd);
 
 void DestroyChildWindows(HWND parent) {
@@ -664,6 +695,37 @@ void DestroyChildWindows(HWND parent) {
         if (!child) return;
         Shim_DestroyWindow(child);
     }
+}
+
+LRESULT InvokeNextCbtHook(int code, WPARAM wParam) {
+    CbtHookCall* call = g_CurrentCbtCall;
+    if (!call) return 0;
+    while (call->Next < call->Hooks.size()) {
+        CbtHookEntry hook = call->Hooks[call->Next++];
+        {
+            ScopedLock lock(g_WindowLock);
+            if (std::none_of(g_CbtHooks.begin(), g_CbtHooks.end(),
+                [&hook](const CbtHookEntry& live) { return live.Handle == hook.Handle; })) continue;
+        }
+        return hook.Proc(code, wParam, hook.Ansi ? call->AnsiParam : call->WideParam);
+    }
+    return 0;
+}
+
+HHOOK InstallCbtHook(HOOKPROC proc, DWORD threadId, bool ansi) {
+    if (!proc) {
+        SetLastError(ERROR_INVALID_FILTER_PROC);
+        return nullptr;
+    }
+    if (threadId != GetCurrentThreadId()) {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return nullptr;
+    }
+    if (!GetCurrentThreadQueue()) return nullptr;
+    ScopedLock lock(g_WindowLock);
+    HHOOK handle = reinterpret_cast<HHOOK>(static_cast<ULONG_PTR>(InterlockedIncrement(&g_NextHook)));
+    g_CbtHooks.push_back({handle, threadId, proc, ansi});
+    return handle;
 }
 
 bool IsClassAtom(LPCWSTR name) {
@@ -689,7 +751,10 @@ bool GetSystemClass(LPCWSTR name, WindowClassEntry& entry) {
     if (!name) return false;
     const wchar_t* const names[] = {
         L"Message", L"#32768", L"#32769", L"#32770", L"#32771", L"#32772",
-        L"STATIC", L"BUTTON", L"EDIT", L"COMBOBOX", L"LISTBOX", L"SCROLLBAR", L"MDICLIENT"
+        L"STATIC", L"BUTTON", L"EDIT", L"COMBOBOX", L"LISTBOX", L"SCROLLBAR", L"MDICLIENT",
+        L"SysListView32", L"SysTreeView32", L"SysTabControl32", L"SysHeader32",
+        L"ToolbarWindow32", L"msctls_progress32", L"msctls_trackbar32", L"msctls_updown32",
+        L"msctls_statusbar32", L"tooltips_class32"
     };
     std::wstring lookup;
     if (IsClassAtom(name)) {
@@ -705,13 +770,17 @@ bool GetSystemClass(LPCWSTR name, WindowClassEntry& entry) {
             entry.ClassNameA = WideToAnsi(entry.ClassName);
             entry.Style = CS_GLOBALCLASS;
             entry.WndProc = Shim_DefWindowProcW;
+            if (EqualsIgnoreCaseWide(lookup, L"#32770")) {
+                entry.WndProc = Shim_DefDlgProcW;
+                entry.WndExtra = DLGWINDOWEXTRA;
+            }
             return true;
         }
     }
     return false;
 }
 
-ATOM RegisterClassCommon(const WNDCLASSEXW& source) {
+ATOM RegisterClassCommon(const WNDCLASSEXW& source, bool ansi = false) {
     if (!source.lpszClassName || IsClassAtom(source.lpszClassName) || !*source.lpszClassName ||
         !source.lpfnWndProc || source.cbClsExtra < 0 || source.cbWndExtra < 0) {
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -742,6 +811,7 @@ ATOM RegisterClassCommon(const WNDCLASSEXW& source) {
         index = (g_NextAtom + index) & 0x3FFFu;
     }
     WindowClassEntry entry;
+    entry.Ansi = ansi;
     entry.Atom = static_cast<ATOM>(0xC000u + index);
     entry.ClassName = source.lpszClassName;
     entry.ClassNameA = WideToAnsi(entry.ClassName);
@@ -882,12 +952,13 @@ LRESULT WINAPI Shim_DefWindowProcW(HWND hWnd, UINT message, WPARAM wParam, LPARA
     return 0;
 }
 
-HWND WINAPI Shim_CreateWindowExW(
+HWND CreateWindowCommon(
     DWORD exStyle, LPCWSTR className, LPCWSTR windowName, DWORD style, int x, int y, int width, int height,
-    HWND parent, HMENU menu, HINSTANCE instance, LPVOID param) {
+    HWND parent, HMENU menu, HINSTANCE instance, LPVOID param, bool ansiCall) {
     auto queue = GetCurrentThreadQueue();
     if (!queue) return nullptr;
     HWND hWnd = nullptr;
+    bool ansiWindow = false;
     {
         ScopedLock lock(g_WindowLock);
         WindowClassEntry system;
@@ -920,6 +991,8 @@ HWND WINAPI Shim_CreateWindowExW(
             }
         }
         WindowEntry entry;
+        entry.Ansi = cls == &system ? ansiCall : cls->Ansi;
+        ansiWindow = entry.Ansi;
         entry.HWnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(InterlockedIncrement(&g_NextHwnd)));
         entry.ThreadId = queue->ThreadId;
         entry.WndProc = cls->WndProc;
@@ -932,7 +1005,7 @@ HWND WINAPI Shim_CreateWindowExW(
         entry.ClassAtom = cls->Atom;
         entry.ClassInstance = cls->HInstance;
         entry.GlobalClass = (cls->Style & CS_GLOBALCLASS) != 0;
-        entry.WindowName = windowName ? windowName : L"";
+        entry.WindowName = windowName && !IsClassAtom(windowName) ? windowName : L"";
         entry.ExtraBytes.resize(static_cast<size_t>(cls->WndExtra), 0);
         hWnd = entry.HWnd;
         g_Windows.push_back(std::move(entry));
@@ -950,7 +1023,36 @@ HWND WINAPI Shim_CreateWindowExW(
     creation.lpszName = windowName;
     creation.lpszClass = className;
     creation.dwExStyle = exStyle;
-    if (!InvokeWindowProc(hWnd, WM_NCCREATE, 0, reinterpret_cast<LPARAM>(&creation))) {
+    CREATESTRUCTA ansiCreation{};
+    static_assert(sizeof(ansiCreation) == sizeof(creation));
+    memcpy(&ansiCreation, &creation, sizeof(creation));
+    std::string ansiName = windowName && !IsClassAtom(windowName) ? WideToAnsi(windowName) : "";
+    std::string ansiClass = !IsClassAtom(className) && className ? WideToAnsi(className) : "";
+    ansiCreation.lpszName = IsClassAtom(windowName) ? reinterpret_cast<LPCSTR>(windowName) : ansiName.c_str();
+    ansiCreation.lpszClass = IsClassAtom(className) ? reinterpret_cast<LPCSTR>(className) : ansiClass.c_str();
+    CBT_CREATEWNDA cbtAnsi{&ansiCreation, HWND_TOP};
+    CBT_CREATEWNDW cbtWide{&creation, HWND_TOP};
+    CbtHookCall call;
+    {
+        ScopedLock lock(g_WindowLock);
+        for (auto it = g_CbtHooks.rbegin(); it != g_CbtHooks.rend(); ++it) {
+            if (it->ThreadId == GetCurrentThreadId()) call.Hooks.push_back(*it);
+        }
+    }
+    call.AnsiParam = reinterpret_cast<LPARAM>(&cbtAnsi);
+    call.WideParam = reinterpret_cast<LPARAM>(&cbtWide);
+    LRESULT hookResult = 0;
+    {
+        ScopedCbtCall scope(call);
+        hookResult = InvokeNextCbtHook(HCBT_CREATEWND, reinterpret_cast<WPARAM>(hWnd));
+    }
+    if (hookResult != 0) {
+        ScopedLock lock(g_WindowLock);
+        RemoveWindowLocked(hWnd);
+        return nullptr;
+    }
+    LPARAM creationParam = ansiWindow ? reinterpret_cast<LPARAM>(&ansiCreation) : reinterpret_cast<LPARAM>(&creation);
+    if (!InvokeWindowProc(hWnd, WM_NCCREATE, 0, creationParam)) {
         {
             ScopedLock lock(g_WindowLock);
             WindowEntry* entry = FindWindowLocked(hWnd);
@@ -963,11 +1065,18 @@ HWND WINAPI Shim_CreateWindowExW(
         return nullptr;
     }
     if (!GetWndProcForWindow(hWnd)) return nullptr;
-    if (InvokeWindowProc(hWnd, WM_CREATE, 0, reinterpret_cast<LPARAM>(&creation)) == -1) {
+    if (InvokeWindowProc(hWnd, WM_CREATE, 0, creationParam) == -1) {
         Shim_DestroyWindow(hWnd);
         return nullptr;
     }
     return GetWndProcForWindow(hWnd) ? hWnd : nullptr;
+}
+
+HWND WINAPI Shim_CreateWindowExW(
+    DWORD exStyle, LPCWSTR className, LPCWSTR windowName, DWORD style, int x, int y, int width, int height,
+    HWND parent, HMENU menu, HINSTANCE instance, LPVOID param) {
+    return CreateWindowCommon(exStyle, className, windowName, style, x, y, width, height,
+        parent, menu, instance, param, false);
 }
 
 BOOL WINAPI Shim_DestroyWindow(HWND hWnd) {
@@ -1074,6 +1183,8 @@ LONG WINAPI Shim_GetWindowLongW(HWND hWnd, int index) {
 LONG WINAPI Shim_SetWindowLongW(HWND hWnd, int index, LONG value) {
     return WindowLongCommon<LONG>(hWnd, index, true, value);
 }
+
+#include "headless_dialog.h"
 
 DWORD WINAPI Shim_GetWindowThreadProcessId(HWND hWnd, LPDWORD processId) {
     ScopedLock lock(g_WindowLock);
@@ -1417,6 +1528,12 @@ DWORD WINAPI Shim_MsgWaitForMultipleObjectsEx(DWORD count, const HANDLE* inputHa
         if (result != WAIT_TIMEOUT) return result;
         if (milliseconds != INFINITE && GetTickCount64() - started >= milliseconds) return WAIT_TIMEOUT;
     }
+}
+
+DWORD WINAPI Shim_MsgWaitForMultipleObjects(DWORD count, const HANDLE* handles,
+                                           BOOL waitAll, DWORD milliseconds, DWORD wakeMask) {
+    return Shim_MsgWaitForMultipleObjectsEx(count, handles, milliseconds, wakeMask,
+        waitAll ? MWMO_WAITALL : 0);
 }
 
 BOOL WINAPI Shim_IsThreadMessageQueueAttached() {
@@ -1794,7 +1911,7 @@ ATOM WINAPI Shim_RegisterClassA(const WNDCLASSA* source) {
     extended.hbrBackground = source->hbrBackground;
     extended.lpszMenuName = menuNamePtr;
     extended.lpszClassName = classNamePtr;
-    return RegisterClassCommon(extended);
+    return RegisterClassCommon(extended, true);
 }
 
 ATOM WINAPI Shim_RegisterClassExA(const WNDCLASSEXA* source) {
@@ -1833,7 +1950,7 @@ ATOM WINAPI Shim_RegisterClassExA(const WNDCLASSEXA* source) {
     extended.lpszMenuName = menuNamePtr;
     extended.lpszClassName = classNamePtr;
     extended.hIconSm = source->hIconSm;
-    return RegisterClassCommon(extended);
+    return RegisterClassCommon(extended, true);
 }
 
 BOOL WINAPI Shim_UnregisterClassA(LPCSTR name, HINSTANCE instance) {
@@ -1988,11 +2105,13 @@ HWND WINAPI Shim_CreateWindowExA(
     }
     std::wstring windowNameW;
     LPCWSTR windowNamePtr = nullptr;
-    if (windowName) {
+    if (IsClassAtom(reinterpret_cast<LPCWSTR>(windowName))) {
+        windowNamePtr = reinterpret_cast<LPCWSTR>(windowName);
+    } else if (windowName) {
         windowNameW = AnsiToWide(windowName);
         windowNamePtr = windowNameW.c_str();
     }
-    return Shim_CreateWindowExW(exStyle, classNamePtr, windowNamePtr, style, x, y, width, height, parent, menu, instance, param);
+    return CreateWindowCommon(exStyle, classNamePtr, windowNamePtr, style, x, y, width, height, parent, menu, instance, param, true);
 }
 
 LRESULT WINAPI Shim_DefWindowProcA(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -2776,32 +2895,28 @@ BOOL WINAPI Shim_GetKeyboardState(PBYTE lpKeyState) {
 }
 
 HHOOK WINAPI Shim_SetWindowsHookExA(int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD dwThreadId) {
-    (void)idHook;
-    (void)lpfn;
     (void)hmod;
-    (void)dwThreadId;
+    if (idHook == WH_CBT) return InstallCbtHook(lpfn, dwThreadId, true);
     return reinterpret_cast<HHOOK>(static_cast<ULONG_PTR>(0x53484801u));
 }
 
 HHOOK WINAPI Shim_SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD dwThreadId) {
-    (void)idHook;
-    (void)lpfn;
     (void)hmod;
-    (void)dwThreadId;
+    if (idHook == WH_CBT) return InstallCbtHook(lpfn, dwThreadId, false);
     return reinterpret_cast<HHOOK>(static_cast<ULONG_PTR>(0x53484801u));
 }
 
 BOOL WINAPI Shim_UnhookWindowsHookEx(HHOOK hhk) {
-    (void)hhk;
+    ScopedLock lock(g_WindowLock);
+    g_CbtHooks.erase(std::remove_if(g_CbtHooks.begin(), g_CbtHooks.end(),
+        [hhk](const CbtHookEntry& hook) { return hook.Handle == hhk; }), g_CbtHooks.end());
     return TRUE;
 }
 
 LRESULT WINAPI Shim_CallNextHookEx(HHOOK hhk, int nCode, WPARAM wParam, LPARAM lParam) {
     (void)hhk;
-    (void)nCode;
-    (void)wParam;
     (void)lParam;
-    return 0;
+    return InvokeNextCbtHook(nCode, wParam);
 }
 
 // --- Static PE Forwarder Shims for user32.dll (DDE), gdi32.dll, and ole32.dll ---
@@ -3063,9 +3178,100 @@ extern "C" HRGN WINAPI Shim_CreateEllipticRgnIndirect(const RECT* lprect) {
     return reinterpret_cast<HRGN>(static_cast<ULONG_PTR>(0x53485201u));
 }
 
+// Region handles follow the existing headless GDI convention, not real rendering.
+HRGN WINAPI Shim_CreateRectRgn(int left, int top, int right, int bottom) {
+    (void)left;
+    (void)top;
+    (void)right;
+    (void)bottom;
+    return reinterpret_cast<HRGN>(static_cast<ULONG_PTR>(0x53485203u));
+}
+
+extern "C" LONG WINAPI Shim_hread(HFILE file, LPVOID buffer, LONG count) {
+    if (count < 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return HFILE_ERROR;
+    }
+    DWORD read = 0;
+    if (!ReadFile(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(file)), buffer,
+                  static_cast<DWORD>(count), &read, nullptr)) return HFILE_ERROR;
+    return static_cast<LONG>(read);
+}
+
+extern "C" BOOL WINAPI Shim_QueryActCtxW(DWORD flags, HANDLE context, PVOID subInstance,
+    ULONG infoClass, PVOID buffer, SIZE_T size, SIZE_T* required) {
+    using QueryFn = BOOL(WINAPI*)(DWORD, HANDLE, PVOID, ULONG, PVOID, SIZE_T, SIZE_T*);
+    static QueryFn query = reinterpret_cast<QueryFn>(
+        GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "QueryActCtxW"));
+    if (!query) {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return FALSE;
+    }
+    BOOL result = query(flags, context, subInstance, infoClass, buffer, size, required);
+    // Nano's unsupported SxS query returns INVALID_FUNCTION. MFC only recognizes
+    // CALL_NOT_IMPLEMENTED as unavailable and otherwise aborts before creating a dialog.
+    if (!result && GetLastError() == ERROR_INVALID_FUNCTION) SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return result;
+}
+
 extern "C" HPALETTE WINAPI Shim_CreateHalftonePalette(HDC hdc) {
     (void)hdc;
     return reinterpret_cast<HPALETTE>(static_cast<ULONG_PTR>(0x53485001u));
+}
+
+HPALETTE WINAPI Shim_CreatePalette(const LOGPALETTE* palette) {
+    if (!palette || palette->palVersion != 0x300 || !palette->palNumEntries) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    return reinterpret_cast<HPALETTE>(static_cast<ULONG_PTR>(0x53485002u));
+}
+
+HPALETTE WINAPI Shim_SelectPalette(HDC hdc, HPALETTE palette, BOOL background) {
+    (void)hdc;
+    (void)background;
+    return palette ? reinterpret_cast<HPALETTE>(static_cast<ULONG_PTR>(0x53485001u)) : nullptr;
+}
+
+// Consistent with GetObject's synthetic 16x16, 32-bit bitmap. No GDI rendering.
+int WINAPI Shim_GetDIBits(HDC hdc, HBITMAP bitmap, UINT start, UINT lines,
+                          LPVOID bits, LPBITMAPINFO info, UINT usage) {
+    (void)hdc;
+    if (!bitmap || !info || info->bmiHeader.biSize != sizeof(BITMAPINFOHEADER) || usage > DIB_PAL_COLORS) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    auto& header = info->bmiHeader;
+    WORD depth = header.biBitCount ? header.biBitCount : 32;
+    if (depth != 1 && depth != 4 && depth != 8 && depth != 16 && depth != 24 && depth != 32) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // Query the synthetic bitmap; when copying, respect the caller's buffer layout.
+    if (!bits) {
+        header.biWidth = 16;
+        header.biHeight = header.biHeight < 0 ? -16 : 16;
+    }
+    if (header.biWidth <= 0 || header.biHeight == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    uint64_t height = header.biHeight < 0 ? -static_cast<int64_t>(header.biHeight) : header.biHeight;
+    uint64_t stride = ((static_cast<uint64_t>(header.biWidth) * depth + 31u) / 32u) * 4u;
+    if (height * stride > MAXDWORD) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    header.biPlanes = 1;
+    header.biBitCount = depth;
+    header.biCompression = BI_RGB;
+    header.biSizeImage = static_cast<DWORD>(stride * height);
+    header.biClrUsed = depth <= 8 ? 1u << depth : 0;
+    header.biClrImportant = 0;
+    if (!bits) return 1;
+    UINT copied = start < height ? static_cast<UINT>((std::min)(static_cast<uint64_t>(lines), height - start)) : 0;
+    memset(bits, 0, static_cast<size_t>(copied) * stride);
+    return static_cast<int>(copied);
 }
 
 extern "C" HRGN WINAPI Shim_CreatePolygonRgn(const POINT* pptl, int cPoint, int iMode) {
@@ -3717,6 +3923,13 @@ const ExportMapping kExportTable[] = {
     {"CallWindowProcA", reinterpret_cast<PVOID>(Shim_CallWindowProcA)},
     {"CreateWindowExW", reinterpret_cast<PVOID>(Shim_CreateWindowExW)},
     {"CreateWindowExA", reinterpret_cast<PVOID>(Shim_CreateWindowExA)},
+    {"CreateDialogIndirectParamA", reinterpret_cast<PVOID>(Shim_CreateDialogIndirectParamA)},
+    {"CreateDialogIndirectParamW", reinterpret_cast<PVOID>(Shim_CreateDialogIndirectParamW)},
+    {"DefDlgProcA", reinterpret_cast<PVOID>(Shim_DefDlgProcW)},
+    {"DefDlgProcW", reinterpret_cast<PVOID>(Shim_DefDlgProcW)},
+    {"GetDlgItem", reinterpret_cast<PVOID>(Shim_GetDlgItem)},
+    {"GetDlgCtrlID", reinterpret_cast<PVOID>(Shim_GetDlgCtrlID)},
+    {"MapDialogRect", reinterpret_cast<PVOID>(Shim_MapDialogRect)},
     {"DestroyWindow", reinterpret_cast<PVOID>(Shim_DestroyWindow)},
     {"DefWindowProcW", reinterpret_cast<PVOID>(Shim_DefWindowProcW)},
     {"DefWindowProcA", reinterpret_cast<PVOID>(Shim_DefWindowProcA)},
@@ -3753,6 +3966,7 @@ const ExportMapping kExportTable[] = {
     {"SetTimer", reinterpret_cast<PVOID>(Shim_SetTimer)},
     {"KillTimer", reinterpret_cast<PVOID>(Shim_KillTimer)},
     {"MsgWaitForMultipleObjectsEx", reinterpret_cast<PVOID>(Shim_MsgWaitForMultipleObjectsEx)},
+    {"MsgWaitForMultipleObjects", reinterpret_cast<PVOID>(Shim_MsgWaitForMultipleObjects)},
     {"IsThreadMessageQueueAttached", reinterpret_cast<PVOID>(Shim_IsThreadMessageQueueAttached)},
     {"SetThreadInputBlocked", reinterpret_cast<PVOID>(Shim_SetThreadInputBlocked)},
     {"GetProcessWindowStation", reinterpret_cast<PVOID>(Shim_GetProcessWindowStation)},
@@ -3763,6 +3977,8 @@ const ExportMapping kExportTable[] = {
     {"MessageBeep", reinterpret_cast<PVOID>(Shim_MessageBeep)},
     {"RegisterClipboardFormatW", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatW)},
     {"RegisterClipboardFormatA", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatA)},
+    {"RegisterWindowMessageW", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatW)},
+    {"RegisterWindowMessageA", reinterpret_cast<PVOID>(Shim_RegisterClipboardFormatA)},
     {"CoInitialize", reinterpret_cast<PVOID>(Shim_CoInitialize)},
     {"CopyEnhMetaFileA", reinterpret_cast<PVOID>(Shim_CopyEnhMetaFileA)},
     {"CopyEnhMetaFileW", reinterpret_cast<PVOID>(Shim_CopyEnhMetaFileW)},
@@ -3918,7 +4134,11 @@ const ExportMapping kExportTable[] = {
     {"CreateBitmapIndirect", reinterpret_cast<PVOID>(Shim_CreateBitmapIndirect)},
     {"CreateDiscardableBitmap", reinterpret_cast<PVOID>(Shim_CreateDiscardableBitmap)},
     {"CreateEllipticRgnIndirect", reinterpret_cast<PVOID>(Shim_CreateEllipticRgnIndirect)},
+    {"CreateRectRgn", reinterpret_cast<PVOID>(Shim_CreateRectRgn)},
     {"CreateHalftonePalette", reinterpret_cast<PVOID>(Shim_CreateHalftonePalette)},
+    {"CreatePalette", reinterpret_cast<PVOID>(Shim_CreatePalette)},
+    {"SelectPalette", reinterpret_cast<PVOID>(Shim_SelectPalette)},
+    {"GetDIBits", reinterpret_cast<PVOID>(Shim_GetDIBits)},
     {"CreateICA", reinterpret_cast<PVOID>(Shim_CreateICA)},
     {"CreatePolygonRgn", reinterpret_cast<PVOID>(Shim_CreatePolygonRgn)},
     {"EnumFontsA", reinterpret_cast<PVOID>(Shim_EnumFontsA)},

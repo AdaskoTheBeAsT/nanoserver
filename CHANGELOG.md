@@ -6,6 +6,42 @@ applications, and build tooling.
 Versions below identify the repository and container revision, not the bundled
 .NET runtime version.
 
+## 1.7.0 - 2026-11-08
+
+Prepared locally; not yet published.
+
+### Added
+
+- Real `kernel32!_hread` file reads, including reads larger than 64 KiB.
+- Headless `RegisterWindowMessageA/W`, `MsgWaitForMultipleObjects`,
+  `CreateRectRgn`, `CreatePalette`, `SelectPalette`, and `GetDIBits` compatibility.
+  Regions and palettes use synthetic handles; bitmap reads return blank pixels.
+- Current-thread `WH_CBT` creation hooks with ANSI/Unicode callbacks, chaining,
+  veto, and attachment before `WM_NCCREATE`.
+- Standard and extended modeless dialog template support through
+  `CreateDialogIndirectParamA/W`, including child controls, `DWLP_DLGPROC`,
+  `WM_INITDIALOG`, message results, and cleanup. Supporting APIs include
+  `DefDlgProcA/W`, `GetDlgItem`, `GetDlgCtrlID`, and `MapDialogRect`.
+- Real-import x86/x64 native regression coverage for legacy reads, message waits,
+  GDI buffer bounds, CBT attachment, and dialog lifecycle and template bounds.
+
+### Fixed
+
+- Normalize unsupported `QueryActCtxW` error `ERROR_INVALID_FUNCTION` to
+  `ERROR_CALL_NOT_IMPLEMENTED` so MFC can take its existing fallback. Calls still
+  delegate to KernelBase; no activation context is fabricated.
+
+### Changed
+
+- Patch lazy compatibility exports only in existing `forwarders\kernel32.dll`
+  files, without a shim import injection, root kernel32 copy, or kernel32
+  KnownDLL change.
+- Update all six flavour tag scripts, README examples, and script regression
+  expectations to container revision `1.7.0` (`-v1.7.0`, `-v1.7`, `-v1`).
+- Keep compatibility documentation generic rather than naming calculation vendors.
+  Headless layout uses fixed font metrics; menus, modal loops, full control
+  behavior, and interactive rendering are not implemented.
+
 ## 1.6.0 - 2026-11-02
 
 ### Added
