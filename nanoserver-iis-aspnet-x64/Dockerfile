@@ -1,9 +1,9 @@
 # escape=`
-ARG DOTNET_VERSION=10.0.14
+ARG DOTNET_VERSION=10.0.15
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer
 
-ARG DOTNET_VERSION=10.0.14
+ARG DOTNET_VERSION=10.0.15
 
 SHELL ["cmd", "/S", "/C"]
 WORKDIR C:\src
@@ -51,7 +51,7 @@ RUN DISM /Online /Get-Capabilities >nul `
     && (if exist C:\Windows\SysWOW64\ntdll.dll (echo WOW64 installed) else (echo WOW64 missing && exit /b 1)) `
     && (if exist C:\Windows\System32\inetsrv\appcmd.exe (echo IIS installed) else (echo IIS/appcmd missing && exit /b 1))
 
-ARG DOTNET_VERSION=10.0.14
+ARG DOTNET_VERSION=10.0.15
 
 # Extract the x64 runtimes directly; Nano Server cannot run the EXE setup engine.
 ENV DOTNET_ROOT="C:\Program Files\dotnet"
@@ -91,6 +91,11 @@ COPY --from=installer ["C:/wow64_runtimes/", "C:/install/sta-shim/"]
 RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim --require-wow64 `
     && copy /Y C:\install\sta-shim\iis_service_monitor.exe C:\iis_service_monitor.exe `
     && rmdir /S /Q C:\install\sta-shim
+
+# Listable parent path for legacy temp-file canonicalization and IIS identities.
+ENV TEMP="C:\Temp" TMP="C:\Temp"
+RUN (if not exist C:\Temp mkdir C:\Temp) `
+    && icacls C:\Temp /grant "*S-1-5-32-545:(OI)(CI)M" "*S-1-5-32-568:(OI)(CI)M" /Q
 
 WORKDIR C:\inetpub\wwwroot
 

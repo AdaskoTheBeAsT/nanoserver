@@ -2,7 +2,7 @@
 
 **Run the "impossible" .NET workloads on Windows Nano Server 2025 (`ltsc2025`).**
 
-Current repository revision: **`1.7.0`** (not yet published).
+Current repository revision: **`1.8.0`**.
 
 This repository provides community-maintained, reusable **Nano Server 2025 base images** (and sample `HealthApi` apps) published to a single unified Docker Hub repository (**`adaskothebeast/nanoserver`**) for the exact .NET scenarios where Microsoft's official images normally force you onto massive **5–8 GB Windows Server Core** containers:
 
@@ -58,7 +58,7 @@ Out of the box, `mcr.microsoft.com/windows/nanoserver:ltsc2025` **cannot** run a
 | ❌ **No IIS 10 included** | Installs `Microsoft.NanoServer.IIS` using online `DISM /Add-Capability`, configures IIS, and monitors WAS and W3SVC in the foreground. |
 | ❌ **No `msiexec` or `netsh` to install ASP.NET Core Hosting Bundle (ANCM V2)** | ✅ Extracts `aspnetcoremodule_x64_en_v2.msi` in a builder stage and uses a standalone C# tool (`dotnet RegisterAncm.dll`) to register `aspnetcorev2.dll` and inject the `system.webServer/aspNetCore` schema into `applicationHost.config`. |
 | ❌ **No Full .NET Framework 4.8.1 (`net481`) or `System.Web`** | ✅ Transplants `C:\Windows\Microsoft.NET` (`Framework` + `Framework64`), native CLR CRT forwarders (`mscoree.dll`, `ucrtbase_clr0400.dll`, `vcruntime140_clr0400.dll`, `vcruntime140_1_clr0400.dll`), 32-bit/64-bit `inetsrv`, and NDP/ASP.NET registry hives from Server Core into Nano Server. |
-| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` / `gdi32.dll` / `comctl32.dll` / `shell32.dll` / `winmm.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). Qualified across all 6 images; see [validation status](docs/roundtable-fix-validation.md) and [benchmarks](docs/benchmarks/README.md). |
+| ❌ **No Single-Threaded Apartment (`STA` / `COINIT_APARTMENTTHREADED`) or Win32 message queue** (desktop window APIs required by COM are omitted) | Installs a native user-mode STA & Win32 message-queue shim (`nanoserver_sta_shim.dll`, 32-bit & 64-bit) into `System32` and `SysWOW64` via `user32.dll` / `ole32.dll` / `gdi32.dll` / `comctl32.dll` / `shell32.dll` / `winmm.dll` forwarders for scoped headless COM and message pumping (toggleable via `NANOSERVER_DISABLE_STA_SHIM=1`). See [current qualification results and limits](docs/plan-2026-11-14.md), [historical validation](docs/roundtable-fix-validation.md), and [benchmarks](docs/benchmarks/README.md). |
 | ❌ **No 32-bit Visual Basic 6 (`msvbvm60.dll`) runtime, legacy DDE/GDI/OLE1 PE exports, ANSI windowing, or registration-free `IDispatch` TypeLib marshaling** | ✅ Pre-installs `msvbvm60.dll` in `SysWOW64` across all 5 WoW64-enabled images, adds 35 missing `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` forwarder exports, provides ANSI window/class/message/clipboard and headless 96-DPI GDI device-context shims, and hooks `oleaut32.dll` (`SxsOleAut32RedirectTypeLibrary`) to resolve embedded `TYPELIB` resources in-memory without `HKCR\TypeLib` registry keys or `sxs.dll`. |
 | ❌ **No 32-bit Visual C++ 10.0 / MFC 10.0 (`mfc100u.dll`, `mfc100.dll`, `atl100.dll`, `msvcr100.dll`, `msvcp100.dll`), `gdiplus.dll`, or `msimg32.dll` runtimes, missing GDI path/transform/metafile exports, or broken `shell32.dll` forwarders (`windows.storage.dll.*`)** | ✅ Pre-installs the 32-bit VC++ 10.0 / MFC 10.0 runtime suite, `msimg32.dll`, and `gdiplus.dll` into `SysWOW64` across all 5 WoW64-enabled images, adds 46 missing `gdi32.dll` (40 exports), `user32.dll` (`MapVirtualKeyExA`), `shell32.dll` (`SHGetPathFromIDListW`, `DragQueryFileW`, `SHGetSpecialFolderLocation`), `winspool.drv` (`GetJobA`), and `winmm.dll` (`PlaySoundA`) exports, redirects broken `shell32.dll` forwarders (`windows.storage.dll.*`) to `nanoserver_sta_shim.dll`, and removes `SHELL32` and `gdiplus` from `KnownDLLs`. |
 | ❌ **No Embarcadero / Borland Delphi VCL (`Vcl.Forms`, `Vcl.Controls`, `Vcl.Graphics`, `Winapi.FlatSB`, `Winapi.MMSystem`) PE exports, headless display monitor (`EnumDisplayMonitors` / `GetMonitorInfo`), or per-monitor DPI (`SHCore!GetDpiForMonitor`)** | ✅ Adds 22 missing Delphi VCL forwarder exports across `gdi32.dll` (`CopyEnhMetaFileW`, `GetEnhMetaFileDescriptionA/W`, `GetTextCharacterExtra`), `user32.dll` (`LoadCursorFromFileA/W`, `SetGestureConfig`), `ole32.dll` (`IsEqualGUID`), `comctl32.dll` (12 `FlatSB_*` exports), and `winmm.dll` (`sndPlaySoundA/W` alongside `PlaySoundA`), implements 11 headless monitor and 96-DPI exports (`EnumDisplayMonitors`, `MonitorFromPoint/Rect/Window`, `GetMonitorInfoA/W`, `GetSystemMetricsForDpi`, `GetDpiForMonitor/Internal/System/Window`) for a synthetic `1024x768` primary monitor, and hooks `SHCore.dll` delay-load tables so Delphi VCL `TScreen` and `TCustomForm` initialize cleanly without `STATUS_INTEGER_DIVIDE_BY_ZERO`. |
@@ -109,8 +109,7 @@ already exist. For example, from the repository root:
 docker build -t ahu-nano-compat:local .\nanoserver-aspnet-x86
 ```
 
-The `1.7.0` changes are prepared locally; the published `v1.6.0` image does not
-contain them. Use a separate local image tag when validating applications.
+Use a separate local image tag when validating application changes.
 
 *(Note: While Microsoft publishes `mcr.microsoft.com/dotnet/aspnet:10.0-nanoserver-ltsc2025` for 64-bit Kestrel, it lacks COM Single-Threaded Apartment (`STA`) and Win32 message-queue support. `nanoserver-aspnet-x64` provides an ultra-slim **697 MB** 64-bit Kestrel image with the native STA & message-queue shim pre-installed.)*
 
@@ -208,52 +207,117 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.7.0`, `-v1.7`, `-v1`). The `1.7.0` tag scheme below is prepared locally; this change does not publish images.
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.8.0`, `-v1.8`, `-v1`).
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.7.0, -v1.7, and -v1
-.\set-version.ps1 -Version 1.7.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v1.8.0, -v1.8, and -v1
+.\set-version.ps1 -Version 1.8.0
 
 # Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.7.0 -DotNetVersion 10.0.14
+.\set-version.ps1 -Version 1.8.0 -DotNetVersion 10.0.15
 ```
 
 - **ASP.NET Core 10 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.14-ltsc2025-v1.7.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.7`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0.15-ltsc2025-v1.8.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.8`
   - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
 - **ASP.NET Core 10 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.14-ltsc2025-v1.7.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.7`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0.15-ltsc2025-v1.8.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.8`
   - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.14-ltsc2025-v1.7.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.7`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.15-ltsc2025-v1.8.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.8`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
 - **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.14-ltsc2025-v1.7.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.7`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.15-ltsc2025-v1.8.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.8`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.7.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.7`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.8.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.8`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.7.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.7`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.8.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.8`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
 
 ---
 
-## What's New in `v1.7.0` (Not Yet Published)
+## What's New in `v1.8.0`
+
+Container revision **`1.8.0`** extends native headless compatibility with:
+
+- An `olepro32.dll` forwarder with Windows-compatible names and ordinals.
+  Property-frame UI returns `E_NOTIMPL`; it does not display or simulate a UI.
+- Bounded ANSI `GetTextExtentExPointA` using fixed 8-by-16 font cells, with
+  negative-count and width-overflow checks. This is not font shaping:
+  `GetCharacterPlacementA/W` and `GetGlyphOutlineA/W` remain unsupported on
+  Nano, even where an export is present.
+- A process-local atom fallback when the native global table is inaccessible.
+  Routing happens inside the loaded atom provider, including for subsequent
+  client `DllMain` calls. The provider is fixed for the process; this is not a
+  cross-process atom service, and kernel32 KnownDLL settings are unchanged.
+- Balanced legacy OLE initialization, stream persistence, runnable-object
+  helpers, and native data-advise holders with owned sink references.
+- Promoted `shlwapi.dll` forwarders, Unicode string helpers, and classic Unicode
+  wrapper ordinals. `StrNCatW` counts the appended segment, including its NUL,
+  rather than the total destination-buffer capacity.
+- Listable, writable `C:\Temp` as `TEMP` and `TMP` in all six Dockerfiles, with
+  SID-based grants retaining users and IIS service identities.
+- A native nontransactional dispenser manager, `comsvcs.dll` and `mtxdm.dll`
+  entry points. Resources are destroyed after reset rather than cached.
+  COM+ transactions and cross-object resource pooling are not implemented.
+  The provider pins its code before registering callbacks. Restoring original
+  hooks does not unload callback code or native COM vtables.
+- Honest dynamic SxS feature detection: when Nano's `FindActCtxSectionStringW`
+  reports an unsupported API, dynamic lookup reports it as unavailable. This
+  allows legacy runtimes to use their existing non-SxS fallback, without
+  modifying runtime binaries or manufacturing assembly identities.
+
+`NanoServerStaShim_GetCapabilities(1)` returns an additive capability bitmask:
+`0x01` ANSI text extent, `0x02` Unicode string helpers, `0x04` legacy OLE,
+`0x08` nontransactional dispenser, `0x10` atom-provider routing, and `0x20`
+unavailable-SxS feature-probe routing. Unknown
+query versions and disabled providers return zero. An image tag or an exported
+stub alone is not a capability check.
+
+The installer prepares import and export changes in memory, then commits each
+rewritten DLL once through verified staging and rollback. Byte-identical
+reinstalls do not replace it. Backup cleanup uses POSIX unlink semantics; after
+`STATUS_CANNOT_DELETE`, a guarded POSIX replacement can remove the backup name
+with an owned delete-on-close marker. This does not truncate an existing image
+stream, ignore read-only attributes, or force an image-section check. Any
+remaining cleanup failure fails installation.
+
+The native regressions exercise public imports, persistence failures, advise
+ownership and reentrancy, classic ordinal mappings, resource lifetime, and
+late-loaded atom calls from `DllMain`. A kernel32-only child releases its last
+explicit provider handle, loads another companion, and verifies a clean process
+exit. The separately built `MappedInstallerRegression_x86.exe` and
+`MappedInstallerRegression_x64.exe` hold all eight rewritten forwarders across
+two installer passes and process teardown. Run these installer probes only as
+administrator in disposable Nano containers, never on the workstation.
+All six four-mode test runs pass, but full `1.8.0` qualification remains blocked
+by two early x86 `STATUS_CONFLICTING_ADDRESSES` exits on the `iis-aspnet-x64`
+candidate. Later clean diagnostic runs do not clear those failures. Exact
+results and remaining gates are recorded in
+[`docs/plan-2026-11-14.md`](./docs/plan-2026-11-14.md).
+An unmodified x86 VC90 CRT and C++ runtime pass a real loading/allocation/math
+probe, including real C++ execution, with their adjacent private manifest. Nano still does not create or
+activate that manifest: this is non-SxS loading, not assembly-identity isolation.
+VC80 and x64 VC90 loading are not qualified. Functional Windows SxS lookups are
+left unchanged. The shim never fabricates successful activation-context results.
+
+## What's New in `v1.7.0`
 
 Container revision **`1.7.0`** adds legacy file reads, message waits, registered
 messages, and headless region/palette/bitmap compatibility. MFC startup can use its
@@ -313,7 +377,7 @@ Container revision **`1.4.0`** adds end-to-end support for **legacy 32-bit Visua
 
 ---
 
-## ✨ What's New in `v1.3.0` (Published to Docker Hub)
+## ✨ What's New in `v1.3.0`
 
 Container revision **`1.3.0`** completes the full [Roundtable review (`R01`–`R26`, `N01`–`N06`)](./docs/issues/roundtable-2026-10-29.md) and is release-qualified across all six flavours (see [`CHANGELOG.md`](./CHANGELOG.md), [`docs/roundtable-fix-validation.md`](./docs/roundtable-fix-validation.md), and [`docs/benchmarks/README.md`](./docs/benchmarks/README.md)):
 
@@ -705,7 +769,7 @@ The native C++ shim and the external C# package both provide headless window/mes
 
 1. **Container build:** `install_sta_shim.exe` refuses a host with
    `System32\win32u.dll`. It preflights the payload and the `user32.dll`,
-   `ole32.dll`, `gdi32.dll`, `comctl32.dll`, `shell32.dll`, and `winmm.dll`
+   `ole32.dll`, `gdi32.dll`, `comctl32.dll`, `shell32.dll`, `winmm.dll`, and `shlwapi.dll`
    forwarders for each selected architecture before changing system files. The
    five images that install WOW64 pass `--require-wow64` (`/require-x86` is an
    alias) and also preflight and install the eight 32-bit runtime DLLs
@@ -718,8 +782,13 @@ The native C++ shim and the external C# package both provide headless window/mes
    forwarders to `nanoserver_sta_shim.<ExportName>`, and redirects existing
    broken forwarders (such as `windows.storage.dll.*` in `shell32.dll`) to
    `nanoserver_sta_shim.<ExportName>`. Both the forwarder and system-directory
-   copies are re-read and checked. Each required failure returns nonzero.
-   KnownDLLs entries for `user32`, `ole32`, `gdi32`, `SHELL32`, and `gdiplus`
+   copies are re-read and checked. Rewritten images lose obsolete Windows
+   hotpatch-compatibility metadata, not ASLR, NX, or CFG protections. This
+   prevents extra loader reservations beyond their declared `SizeOfImage`.
+   Malformed debug metadata fails preflight before any system-file mutation.
+   Verified backups use POSIX unlink so existing mapped views remain valid.
+   Each required failure, including backup cleanup, returns nonzero.
+   KnownDLLs entries for `user32`, `ole32`, `gdi32`, `SHELL32`, `gdiplus`, and `shlwapi`
    are removed only after the files have passed verification; already-absent
    values count as success. Installation is not a transaction across all files;
    a failed Docker build must not be published.

@@ -1,0 +1,13 @@
+LIBRARY olepro32
+EXPORTS
+    OleIconToCursor=oleaut32.OleIconToCursor @248
+    OleCreatePropertyFrameIndirect=nanoserver_sta_shim.OleCreatePropertyFrameIndirect @249
+    OleCreatePropertyFrame=nanoserver_sta_shim.OleCreatePropertyFrame @250
+    OleLoadPicture=oleaut32.OleLoadPicture @251
+    OleCreatePictureIndirect=oleaut32.OleCreatePictureIndirect @252
+    OleCreateFontIndirect=oleaut32.OleCreateFontIndirect @253
+    OleTranslateColor=oleaut32.OleTranslateColor @254
+    DllCanUnloadNow=oleaut32.DllCanUnloadNow @255 PRIVATE
+    DllGetClassObject=oleaut32.DllGetClassObject @256 PRIVATE
+    DllRegisterServer=oleaut32.DllRegisterServer @257 PRIVATE
+    DllUnregisterServer=oleaut32.DllUnregisterServer @258 PRIVATE

@@ -1,0 +1,5 @@
+LIBRARY comsvcs
+EXPORTS
+    DllGetClassObject=nanoserver_sta_shim.NanoServerStaShim_DispenserDllGetClassObject PRIVATE
+    DllCanUnloadNow=nanoserver_sta_shim.NanoServerStaShim_DispenserDllCanUnloadNow PRIVATE
+    DispManGetContext=nanoserver_sta_shim.DispManGetContext

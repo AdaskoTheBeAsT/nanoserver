@@ -96,6 +96,78 @@ IMAGE_NT_HEADERS* GetPeHeaders(std::vector<BYTE>& bytes) {
     return nt;
 }
 
+bool PeRvaRange(const std::vector<BYTE>& bytes, IMAGE_NT_HEADERS* nt, DWORD rva,
+                DWORD length, size_t& offset) {
+    DWORD headersSize = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ?
+        reinterpret_cast<IMAGE_NT_HEADERS32*>(nt)->OptionalHeader.SizeOfHeaders :
+        reinterpret_cast<IMAGE_NT_HEADERS64*>(nt)->OptionalHeader.SizeOfHeaders;
+    if (rva < headersSize && IsBufferRange(headersSize, rva, length)) {
+        offset = rva;
+        return IsBufferRange(bytes.size(), offset, length);
+    }
+    const auto* sections = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const auto& section = sections[i];
+        if (rva < section.VirtualAddress) continue;
+        DWORD delta = rva - section.VirtualAddress;
+        DWORD span = (std::max)(section.Misc.VirtualSize, section.SizeOfRawData);
+        if (delta >= span) continue;
+        if (!IsBufferRange(section.SizeOfRawData, delta, length) ||
+            !IsBufferRange(bytes.size(), section.PointerToRawData, section.SizeOfRawData)) return false;
+        offset = static_cast<size_t>(section.PointerToRawData) + delta;
+        return true;
+    }
+    return false;
+}
+
+bool ClearModifiedImageHotpatchCompatibility(std::vector<BYTE>& bytes, bool& modified) {
+    modified = false;
+    auto invalid = [] { SetLastError(ERROR_BAD_EXE_FORMAT); return false; };
+    auto* nt = GetPeHeaders(bytes);
+    if (!nt) return invalid();
+    bool is32 = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    auto* pe32 = reinterpret_cast<IMAGE_NT_HEADERS32*>(nt);
+    auto* pe64 = reinterpret_cast<IMAGE_NT_HEADERS64*>(nt);
+    DWORD count = is32 ? pe32->OptionalHeader.NumberOfRvaAndSizes : pe64->OptionalHeader.NumberOfRvaAndSizes;
+    if (count <= IMAGE_DIRECTORY_ENTRY_DEBUG) return true;
+    auto* directories = is32 ? pe32->OptionalHeader.DataDirectory : pe64->OptionalHeader.DataDirectory;
+    const auto& directory = directories[IMAGE_DIRECTORY_ENTRY_DEBUG];
+    if (!directory.VirtualAddress && !directory.Size) return true;
+    size_t offset = 0;
+    if (!directory.VirtualAddress || !directory.Size || directory.Size % sizeof(IMAGE_DEBUG_DIRECTORY) ||
+        !PeRvaRange(bytes, nt, directory.VirtualAddress, directory.Size, offset)) return invalid();
+    std::vector<size_t> characteristics;
+    for (size_t entry = 0; entry < directory.Size; entry += sizeof(IMAGE_DEBUG_DIRECTORY)) {
+        IMAGE_DEBUG_DIRECTORY debug{};
+        memcpy(&debug, bytes.data() + offset + entry, sizeof(debug));
+        if (debug.Type != IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS) continue;
+        if (debug.SizeOfData < sizeof(DWORD) || !debug.PointerToRawData ||
+            !IsBufferRange(bytes.size(), debug.PointerToRawData, debug.SizeOfData)) return invalid();
+        size_t mapped = 0;
+        if (debug.AddressOfRawData &&
+            (!PeRvaRange(bytes, nt, debug.AddressOfRawData, debug.SizeOfData, mapped) ||
+             mapped != debug.PointerToRawData)) return invalid();
+        characteristics.push_back(debug.PointerToRawData);
+    }
+    // Rewritten OS images no longer match Microsoft's hotpatch baseline. Retaining
+    // this bit also reserves an image-extension tail that can crowd kernel32's
+    // ASLR address during parallel WOW64 startup. Keep CET, ASLR, NX and CFG intact.
+    for (size_t data : characteristics) {
+        DWORD flags = 0;
+        memcpy(&flags, bytes.data() + data, sizeof(flags));
+        if (!(flags & IMAGE_DLLCHARACTERISTICS_EX_HOTPATCH_COMPATIBLE)) continue;
+        flags &= ~IMAGE_DLLCHARACTERISTICS_EX_HOTPATCH_COMPATIBLE;
+        memcpy(bytes.data() + data, &flags, sizeof(flags));
+        modified = true;
+    }
+    if (modified) {
+        if (is32) pe32->OptionalHeader.DllCharacteristics &= ~IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY;
+        else pe64->OptionalHeader.DllCharacteristics &= ~IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY;
+        directories[IMAGE_DIRECTORY_ENTRY_SECURITY] = {};
+    }
+    return true;
+}
+
 bool ReadPeString(const std::vector<BYTE>& bytes, DWORD offset, std::string& output) {
     if (!offset || offset >= bytes.size()) return false;
     const char* start = reinterpret_cast<const char*>(bytes.data() + offset);
@@ -116,14 +188,23 @@ bool VerifyFileBytes(const wchar_t* path, const std::vector<BYTE>& expected) {
 }
 
 bool SetFileInformationForRestore(const wchar_t* path, DWORD access, FILE_INFO_BY_HANDLE_CLASS type,
-                                 void* information, DWORD size) {
+                                 void* information, DWORD size, LONG* nativeStatus = nullptr) {
+    using LastStatusFn = LONG (NTAPI*)();
+    LastStatusFn lastStatus = nullptr;
+    if (nativeStatus) {
+        *nativeStatus = 0;
+        lastStatus = reinterpret_cast<LastStatusFn>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetLastNtStatus"));
+    }
     HANDLE file = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
     BOOL success = SetFileInformationByHandle(file, type, information, size);
     DWORD error = GetLastError();
-    if (!success) fwprintf(stderr, L"[ERR] File metadata update failed (class=%d): %s (err=%lu).\n",
-                          static_cast<int>(type), path, error);
+    if (!success && nativeStatus && lastStatus) *nativeStatus = lastStatus();
+    if (!success && !nativeStatus)
+        fwprintf(stderr, L"[ERR] File metadata update failed (class=%d): %s (err=%lu).\n",
+                 static_cast<int>(type), path, error);
     if (!CloseHandle(file)) {
         if (success) error = GetLastError();
         success = FALSE;
@@ -139,10 +220,75 @@ bool SetFileAttributesForRestore(const wchar_t* path, DWORD attributes) {
                                         &information, sizeof(information));
 }
 
+bool UnlinkMappedImageForRestore(const wchar_t* path) {
+    HANDLE original = CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (original == INVALID_HANDLE_VALUE) return false;
+    std::wstring markerPath = std::wstring(path) + L".unlink";
+    HANDLE marker = INVALID_HANDLE_VALUE;
+    bool success = [&] {
+        FILE_BASIC_INFO basic{};
+        if (!GetFileInformationByHandleEx(original, FileBasicInfo, &basic, sizeof(basic))) return false;
+        if (basic.FileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return false;
+        }
+        marker = CreateFileW(markerPath.c_str(), GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+        if (marker == INVALID_HANDLE_VALUE) return false;
+        FILE_DISPOSITION_INFO_EX onClose{FILE_DISPOSITION_FLAG_DELETE |
+            FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_ON_CLOSE};
+        if (!SetFileInformationByHandle(marker, FileDispositionInfoEx, &onClose, sizeof(onClose))) return false;
+
+        // Replace only the cleanup name. The original image stream remains
+        // available to existing views; the owned empty replacement dies on close.
+        std::wstring target = path;
+        std::vector<BYTE> buffer(sizeof(FILE_RENAME_INFO) + target.size() * sizeof(wchar_t), 0);
+        auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+        rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        rename->FileNameLength = static_cast<DWORD>(target.size() * sizeof(wchar_t));
+        memcpy(rename->FileName, target.c_str(), (target.size() + 1) * sizeof(wchar_t));
+        return SetFileInformationByHandle(marker, FileRenameInfoEx, rename, static_cast<DWORD>(buffer.size())) != FALSE;
+    }();
+    DWORD error = GetLastError();
+    if (marker != INVALID_HANDLE_VALUE && !CloseHandle(marker)) {
+        if (success) error = GetLastError();
+        success = false;
+    }
+    if (!CloseHandle(original)) {
+        if (success) error = GetLastError();
+        success = false;
+    }
+    if (!success) { SetLastError(error); return false; }
+    const wchar_t* removed[] = {path, markerPath.c_str()};
+    for (const wchar_t* name : removed) {
+        if (GetFileAttributesW(name) != INVALID_FILE_ATTRIBUTES) {
+            SetLastError(ERROR_FILE_EXISTS);
+            return false;
+        }
+        DWORD missing = GetLastError();
+        if (missing != ERROR_FILE_NOT_FOUND && missing != ERROR_PATH_NOT_FOUND) return false;
+    }
+    fwprintf(stdout, L"[OK] Removed mapped image backup by POSIX replacement: %s\n", path);
+    return true;
+}
+
 bool DeleteFileForRestore(const wchar_t* path) {
-    FILE_DISPOSITION_INFO information{TRUE};
-    return SetFileInformationForRestore(path, DELETE, FileDispositionInfo,
-                                        &information, sizeof(information));
+    FILE_DISPOSITION_INFO_EX information{
+        FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS};
+    LONG status = 0;
+    if (SetFileInformationForRestore(path, DELETE, FileDispositionInfoEx,
+                                     &information, sizeof(information), &status)) return true;
+    // Container file systems can still reject POSIX disposition for an image.
+    // Do not retry permission failures or ignore the read-only attribute.
+    constexpr LONG cannotDelete = static_cast<LONG>(0xC0000121u);
+    if (status == cannotDelete && UnlinkMappedImageForRestore(path)) return true;
+    DWORD error = GetLastError();
+    fwprintf(stderr, L"[ERR] File removal failed: %s (err=%lu, status=0x%08lX).\n",
+             path, error, static_cast<ULONG>(status));
+    SetLastError(error);
+    return false;
 }
 
 bool MoveFileForRestore(const wchar_t* source, const wchar_t* destination) {
@@ -237,15 +383,18 @@ bool WritePeBufferToFile(const wchar_t* path, std::vector<BYTE>& bytes, size_t c
     if (!SetFileAttributesForRestore(path, attributes) || !DeleteFileForRestore(backup.c_str())) return false;
     return true;
 }
-bool PatchPeFileImports(const wchar_t* filePath) {
-    std::vector<BYTE> buf;
-    if (!ReadFileBuffer(filePath, buf)) return false;
+bool PatchPeFileImports(const wchar_t* filePath, std::vector<BYTE>* prepared = nullptr) {
+    std::vector<BYTE> storage;
+    auto& buf = prepared ? *prepared : storage;
+    if (!prepared && !ReadFileBuffer(filePath, buf)) return false;
     auto* nt = GetPeHeaders(buf);
     if (!nt) {
         SetLastError(ERROR_BAD_EXE_FORMAT);
         return false;
     }
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(buf.data());
+    bool metadataModified = false;
+    if (!ClearModifiedImageHotpatchCompatibility(buf, metadataModified)) return false;
 
     WORD magic = *reinterpret_cast<WORD*>(&nt->OptionalHeader.Magic);
     DWORD impRva = 0;
@@ -303,6 +452,7 @@ bool PatchPeFileImports(const wchar_t* filePath) {
         return false;
     }
 
+    if (prepared) return true;
     if (!WritePeBufferToFile(filePath, buf, checksumOffset)) return false;
     wprintf(L"[OK] Patched imports in: %s\n", filePath);
     return true;
@@ -318,19 +468,30 @@ struct ForwarderFixup {
     std::string Target;
 };
 
-bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>& missingExports) {
-    if (missingExports.empty()) {
+struct OrdinalExport {
+    WORD Ordinal;
+    const char* Target;
+    const char* Name = nullptr;
+};
+
+bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>& missingExports,
+                        const std::vector<OrdinalExport>& ordinalExports = {}, bool replaceCode = false,
+                        std::vector<BYTE>* prepared = nullptr) {
+    if (missingExports.empty() && ordinalExports.empty()) {
         return true;
     }
 
-    std::vector<BYTE> buf;
-    if (!ReadFileBuffer(filePath, buf)) return false;
+    std::vector<BYTE> storage;
+    auto& buf = prepared ? *prepared : storage;
+    if (!prepared && !ReadFileBuffer(filePath, buf)) return false;
     auto* nt = GetPeHeaders(buf);
     if (!nt) {
         SetLastError(ERROR_BAD_EXE_FORMAT);
         return false;
     }
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(buf.data());
+    bool metadataModified = false;
+    if (!ClearModifiedImageHotpatchCompatibility(buf, metadataModified)) return false;
 
     WORD magic = *reinterpret_cast<WORD*>(&nt->OptionalHeader.Magic);
     DWORD expRva = 0;
@@ -430,17 +591,74 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
             ++addedCount;
         } else {
             const std::string shimTarget = std::string("nanoserver_sta_shim.") + missingName;
+            bool hasForwarder = false;
             for (auto& fixup : forwarderFixups) {
-                if (fixup.OrdinalIndex == existingOrdIdx && fixup.Target != shimTarget) {
-                    fixup.Target = shimTarget;
-                    ++addedCount;
+                if (fixup.OrdinalIndex == existingOrdIdx) {
+                    hasForwarder = true;
+                    if (fixup.Target != shimTarget) { fixup.Target = shimTarget; ++addedCount; }
                     break;
                 }
+            }
+            if (!hasForwarder && replaceCode) {
+                forwarderFixups.push_back(ForwarderFixup{existingOrdIdx, shimTarget});
+                ++addedCount;
             }
         }
     }
 
+    // Reserve classic ordinal slots before relocating aliases, so a preserved
+    // named export cannot be displaced again by a later ordinal in this pass.
+    for (const auto& entry : ordinalExports) {
+        if (entry.Ordinal < origExpDir.Base || entry.Ordinal - origExpDir.Base >= 0x10000u) return false;
+        WORD index = static_cast<WORD>(entry.Ordinal - origExpDir.Base);
+        if (index >= newFunctions.size()) newFunctions.resize(static_cast<size_t>(index) + 1, 0);
+    }
+    for (const auto& entry : ordinalExports) {
+        WORD index = static_cast<WORD>(entry.Ordinal - origExpDir.Base);
+        bool hasAliases = std::any_of(namedExports.begin(), namedExports.end(),
+            [&](const NamedExportEntry& item) {
+                return item.OrdinalIndex == index && (!entry.Name || item.Name != entry.Name);
+            });
+        if (hasAliases) {
+            if (newFunctions.size() >= 0x10000u) return false;
+            WORD preserved = static_cast<WORD>(newFunctions.size());
+            newFunctions.push_back(newFunctions[index]);
+            auto previous = std::find_if(forwarderFixups.begin(), forwarderFixups.end(),
+                [index](const ForwarderFixup& item) { return item.OrdinalIndex == index; });
+            if (previous != forwarderFixups.end()) {
+                std::string target = previous->Target;
+                forwarderFixups.push_back(ForwarderFixup{preserved, target});
+            }
+            for (auto& item : namedExports)
+                if (item.OrdinalIndex == index && (!entry.Name || item.Name != entry.Name))
+                    item.OrdinalIndex = preserved;
+            ++addedCount;
+        }
+        if (entry.Name) {
+            auto named = std::find_if(namedExports.begin(), namedExports.end(),
+                [&](const NamedExportEntry& item) { return item.Name == entry.Name; });
+            if (named == namedExports.end()) {
+                namedExports.push_back(NamedExportEntry{entry.Name, index});
+                ++addedCount;
+            } else if (named->OrdinalIndex != index) {
+                named->OrdinalIndex = index;
+                ++addedCount;
+            }
+        }
+        auto found = std::find_if(forwarderFixups.begin(), forwarderFixups.end(),
+            [index](const ForwarderFixup& item) { return item.OrdinalIndex == index; });
+        if (found == forwarderFixups.end()) {
+            forwarderFixups.push_back(ForwarderFixup{index, entry.Target});
+            ++addedCount;
+        } else if (found->Target != entry.Target) {
+            found->Target = entry.Target;
+            ++addedCount;
+        }
+    }
+
     if (addedCount == 0) {
+        if (prepared) return true;
+        if (metadataModified && !WritePeBufferToFile(filePath, buf, checksumOffset)) return false;
         wprintf(L"[OK] Exports already present in: %s\n", filePath);
         return true;
     }
@@ -572,11 +790,32 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
         nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].Size = 0;
     }
 
+    if (prepared) return true;
     if (!WritePeBufferToFile(filePath, buf, checksumOffset)) {
         return false;
     }
 
     wprintf(L"[OK] Added %zu missing export(s) to: %s\n", addedCount, filePath);
+    return true;
+}
+
+bool PatchPeFileImportsAndExports(const wchar_t* path, const std::vector<const char*>& exports,
+                                 const std::vector<OrdinalExport>& ordinals = {}, bool replaceCode = false) {
+    std::vector<BYTE> bytes;
+    if (!ReadFileBuffer(path, bytes)) return false;
+    const auto original = bytes;
+    // Never publish an import-only intermediate image. A loader can map it
+    // before the export pass, preventing cleanup of that second replacement.
+    if (!PatchPeFileImports(path, &bytes) ||
+        !PatchPeFileExports(path, exports, ordinals, replaceCode, &bytes)) return false;
+    if (bytes == original) {
+        wprintf(L"[OK] Imports and exports already current in: %s\n", path);
+        return true;
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
+    size_t checksumOffset = static_cast<size_t>(dos->e_lfanew) + 24 + 64;
+    if (!WritePeBufferToFile(path, bytes, checksumOffset)) return false;
+    wprintf(L"[OK] Patched imports and exports in: %s\n", path);
     return true;
 }
 
@@ -619,7 +858,7 @@ bool OpenKnownDlls(HKEY* key) {
 bool RemoveKnownDllEntries() {
     HKEY key = nullptr;
     if (!OpenKnownDlls(&key)) return false;
-    for (const wchar_t* name : {L"user32", L"ole32", L"gdi32", L"SHELL32", L"gdiplus"}) {
+    for (const wchar_t* name : {L"user32", L"ole32", L"gdi32", L"SHELL32", L"gdiplus", L"shlwapi"}) {
         LSTATUS status = RegDeleteValueW(key, name);
         if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
             RegCloseKey(key);
@@ -652,6 +891,7 @@ bool CopyRequiredFile(const std::wstring& source, const std::wstring& destinatio
 }
 
 const std::vector<const char*> kGdi32Exports = {
+    "GetTextExtentExPointA",
     "CopyEnhMetaFileA", "CopyEnhMetaFileW", "GetEnhMetaFileDescriptionA", "GetEnhMetaFileDescriptionW",
     "GetTextCharacterExtra", "CreatePenIndirect", "GetTextExtentPoint32A", "SetWinMetaFileBits",
     "CopyMetaFileA", "CreateBitmapIndirect", "CreateDiscardableBitmap", "CreateEllipticRgnIndirect",
@@ -682,6 +922,8 @@ const std::vector<const char*> kUser32Exports = {
     "LoadCursorFromFileA", "LoadCursorFromFileW", "SetGestureConfig"
 };
 const std::vector<const char*> kOle32Exports = {
+    "CoInitialize", "OleInitialize", "OleUninitialize", "OleRun", "OleLockRunning",
+    "OleSaveToStream", "OleLoadFromStream", "CreateDataAdviseHolder", "ReleaseStgMedium",
     "CoIsOle1Class", "IsEqualGUID", "OleConvertIStorageToOLESTREAM", "OleConvertOLESTREAMToIStorage",
     "OleCreateLink", "OleDoAutoConvert"
 };
@@ -698,6 +940,35 @@ const std::vector<const char*> kShell32Exports = {
 const std::vector<const char*> kWinmmExports = {
     "PlaySoundA", "sndPlaySoundA", "sndPlaySoundW"
 };
+const std::vector<const char*> kShlwapiExports = {"StrCpyW", "StrCatW", "StrCpyNW", "StrNCatW"};
+// Classic Windows ABI, including NONAME exports. Never append these at new ordinals.
+const std::vector<OrdinalExport> kShlwapiOrdinals = {
+    {28, "user32.IsCharAlphaNumericW"}, {38, "user32.CharLowerW"},
+    {44, "user32.CharUpperBuffW"}, {45, "kernel32.CompareStringW"},
+    {52, "kernel32.CreateFileW"}, {66, "kernel32.FindResourceW"},
+    {115, "kernel32.OutputDebugStringW"}, {159, "kernel32.CompareStringW"},
+    {310, "kernel32.GetTimeFormatW"}, {311, "kernel32.GetDateFormatW"},
+    {838, "nanoserver_sta_shim.StrCatW", "StrCatW"},
+    {852, "nanoserver_sta_shim.StrCpyNW", "StrCpyNW"},
+    {853, "nanoserver_sta_shim.StrCpyW", "StrCpyW"},
+    {867, "nanoserver_sta_shim.StrNCatW", "StrNCatW"}
+};
+const std::vector<OrdinalExport>& ShlwapiOrdinals(WORD machine) {
+    // The NONAME ordinals are shared. The named helpers differ on x64.
+    static const std::vector<OrdinalExport> x64 = [] {
+        std::vector<OrdinalExport> exports;
+        for (const auto& entry : kShlwapiOrdinals) if (!entry.Name) exports.push_back(entry);
+        exports.insert(exports.end(), {
+            {843, "nanoserver_sta_shim.StrCatW", "StrCatW"},
+            {857, "nanoserver_sta_shim.StrCpyNW", "StrCpyNW"},
+            {858, "nanoserver_sta_shim.StrCpyW", "StrCpyW"},
+            {872, "nanoserver_sta_shim.StrNCatW", "StrNCatW"}
+        });
+        return exports;
+    }();
+    return machine == IMAGE_FILE_MACHINE_AMD64 ? x64 : kShlwapiOrdinals;
+}
+
 const std::vector<const char*> kNoExports;
 
 const std::vector<const char*>& RequiredExports(const std::wstring& name) {
@@ -707,6 +978,7 @@ const std::vector<const char*>& RequiredExports(const std::wstring& name) {
     if (name == L"comctl32.dll") return kComctl32Exports;
     if (name == L"shell32.dll") return kShell32Exports;
     if (name == L"winmm.dll") return kWinmmExports;
+    if (name == L"shlwapi.dll") return kShlwapiExports;
     return kNoExports;
 }
 
@@ -716,6 +988,8 @@ bool VerifyPatchedPe(const wchar_t* path, const std::vector<const char*>& requir
     if (!ReadFileBuffer(path, bytes)) return false;
     auto* nt = GetPeHeaders(bytes);
     if (!nt) return false;
+    bool metadataModified = false;
+    if (!ClearModifiedImageHotpatchCompatibility(bytes, metadataModified) || metadataModified) return false;
     const auto* directories = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ?
         reinterpret_cast<IMAGE_NT_HEADERS32*>(nt)->OptionalHeader.DataDirectory :
         reinterpret_cast<IMAGE_NT_HEADERS64*>(nt)->OptionalHeader.DataDirectory;
@@ -772,17 +1046,121 @@ bool PreflightPe(const std::wstring& path, WORD machine) {
     std::vector<BYTE> bytes;
     if (ReadFileBuffer(path.c_str(), bytes)) {
         auto* headers = GetPeHeaders(bytes);
-        if (headers && headers->FileHeader.Machine == machine) return true;
+        bool metadataModified = false;
+        if (headers && headers->FileHeader.Machine == machine &&
+            ClearModifiedImageHotpatchCompatibility(bytes, metadataModified)) return true;
         SetLastError(ERROR_BAD_EXE_FORMAT);
     }
     fwprintf(stderr, L"[ERR] Missing or invalid required PE: %s (err=%lu)\n", path.c_str(), GetLastError());
     return false;
 }
 
+bool VerifyOrdinalForwarders(const std::wstring& path, const std::vector<OrdinalExport>& expected) {
+    std::vector<BYTE> bytes;
+    if (!ReadFileBuffer(path.c_str(), bytes)) return false;
+    auto* nt = GetPeHeaders(bytes);
+    if (!nt) return false;
+    const auto* directories = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ?
+        reinterpret_cast<IMAGE_NT_HEADERS32*>(nt)->OptionalHeader.DataDirectory :
+        reinterpret_cast<IMAGE_NT_HEADERS64*>(nt)->OptionalHeader.DataDirectory;
+    const auto& directory = directories[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    DWORD offset = RvaToOffset(nt, nt->FileHeader.NumberOfSections, directory.VirtualAddress);
+    if (!offset || !IsBufferRange(bytes.size(), offset, sizeof(IMAGE_EXPORT_DIRECTORY))) return false;
+    auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(bytes.data() + offset);
+    DWORD functions = RvaToOffset(nt, nt->FileHeader.NumberOfSections, exports->AddressOfFunctions);
+    if (!functions || !IsBufferRange(bytes.size(), functions,
+        static_cast<size_t>(exports->NumberOfFunctions) * sizeof(DWORD))) return false;
+    for (const auto& entry : expected) {
+        if (entry.Ordinal < exports->Base || entry.Ordinal - exports->Base >= exports->NumberOfFunctions) return false;
+        DWORD target = reinterpret_cast<const DWORD*>(bytes.data() + functions)[entry.Ordinal - exports->Base];
+        if (target < directory.VirtualAddress || target - directory.VirtualAddress >= directory.Size) return false;
+        std::string actual;
+        if (!ReadPeString(bytes, RvaToOffset(nt, nt->FileHeader.NumberOfSections, target), actual) ||
+            actual != entry.Target) return false;
+    }
+    return true;
+}
+
+const std::vector<OrdinalExport>& CompanionExports(const wchar_t* name) {
+    static const std::vector<OrdinalExport> olepro = {
+        {248, "oleaut32.OleIconToCursor", "OleIconToCursor"},
+        {249, "nanoserver_sta_shim.OleCreatePropertyFrameIndirect", "OleCreatePropertyFrameIndirect"},
+        {250, "nanoserver_sta_shim.OleCreatePropertyFrame", "OleCreatePropertyFrame"},
+        {251, "oleaut32.OleLoadPicture", "OleLoadPicture"},
+        {252, "oleaut32.OleCreatePictureIndirect", "OleCreatePictureIndirect"},
+        {253, "oleaut32.OleCreateFontIndirect", "OleCreateFontIndirect"},
+        {254, "oleaut32.OleTranslateColor", "OleTranslateColor"},
+        {255, "oleaut32.DllCanUnloadNow", "DllCanUnloadNow"},
+        {256, "oleaut32.DllGetClassObject", "DllGetClassObject"},
+        {257, "oleaut32.DllRegisterServer", "DllRegisterServer"},
+        {258, "oleaut32.DllUnregisterServer", "DllUnregisterServer"}
+    };
+    static const std::vector<OrdinalExport> comsvcs = {
+        {0, "nanoserver_sta_shim.DispManGetContext", "DispManGetContext"},
+        {0, "nanoserver_sta_shim.NanoServerStaShim_DispenserDllCanUnloadNow", "DllCanUnloadNow"},
+        {0, "nanoserver_sta_shim.NanoServerStaShim_DispenserDllGetClassObject", "DllGetClassObject"}
+    };
+    static const std::vector<OrdinalExport> mtxdm = {
+        {0, "nanoserver_sta_shim.GetDispenserManager", "GetDispenserManager"}
+    };
+    return wcscmp(name, L"olepro32") == 0 ? olepro : wcscmp(name, L"comsvcs") == 0 ? comsvcs : mtxdm;
+}
+
+bool VerifyCompanionExports(const std::wstring& path, const std::vector<OrdinalExport>& expected) {
+    std::vector<BYTE> bytes;
+    if (!ReadFileBuffer(path.c_str(), bytes)) return false;
+    auto* nt = GetPeHeaders(bytes);
+    if (!nt) return false;
+    const auto* directories = nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ?
+        reinterpret_cast<IMAGE_NT_HEADERS32*>(nt)->OptionalHeader.DataDirectory :
+        reinterpret_cast<IMAGE_NT_HEADERS64*>(nt)->OptionalHeader.DataDirectory;
+    const auto& directory = directories[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    DWORD offset = RvaToOffset(nt, nt->FileHeader.NumberOfSections, directory.VirtualAddress);
+    if (!offset || !IsBufferRange(bytes.size(), offset, sizeof(IMAGE_EXPORT_DIRECTORY))) return false;
+    const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(bytes.data() + offset);
+    if (exports->NumberOfNames != expected.size() || exports->NumberOfFunctions != expected.size()) return false;
+    DWORD functions = RvaToOffset(nt, nt->FileHeader.NumberOfSections, exports->AddressOfFunctions);
+    DWORD names = RvaToOffset(nt, nt->FileHeader.NumberOfSections, exports->AddressOfNames);
+    DWORD ordinals = RvaToOffset(nt, nt->FileHeader.NumberOfSections, exports->AddressOfNameOrdinals);
+    if (!functions || !names || !ordinals ||
+        !IsBufferRange(bytes.size(), functions, expected.size() * sizeof(DWORD)) ||
+        !IsBufferRange(bytes.size(), names, expected.size() * sizeof(DWORD)) ||
+        !IsBufferRange(bytes.size(), ordinals, expected.size() * sizeof(WORD))) return false;
+    for (const auto& entry : expected) {
+        bool found = false;
+        for (DWORD i = 0; i < exports->NumberOfNames; ++i) {
+            std::string name, target;
+            if (!ReadPeString(bytes, RvaToOffset(nt, nt->FileHeader.NumberOfSections,
+                reinterpret_cast<const DWORD*>(bytes.data() + names)[i]), name)) return false;
+            if (name != entry.Name) continue;
+            WORD ordinal = reinterpret_cast<const WORD*>(bytes.data() + ordinals)[i];
+            if (ordinal >= exports->NumberOfFunctions ||
+                (entry.Ordinal && exports->Base + ordinal != entry.Ordinal)) return false;
+            DWORD rva = reinterpret_cast<const DWORD*>(bytes.data() + functions)[ordinal];
+            if (rva < directory.VirtualAddress || rva - directory.VirtualAddress >= directory.Size ||
+                !ReadPeString(bytes, RvaToOffset(nt, nt->FileHeader.NumberOfSections, rva), target) ||
+                target != entry.Target) return false;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
 bool PreflightArchitecture(const std::wstring& payload, const std::wstring& systemDirectory, WORD machine) {
     if (!PreflightPe(payload, machine)) return false;
+    std::wstring directory = payload.substr(0, payload.find_last_of(L"\\/") + 1);
+    for (const wchar_t* name : {L"olepro32", L"comsvcs", L"mtxdm"}) {
+        std::wstring companion = directory + name + (machine == IMAGE_FILE_MACHINE_I386 ? L"_x86.dll" : L"_x64.dll");
+        if (!PreflightPe(companion, machine) || !VerifyCompanionExports(companion, CompanionExports(name))) {
+            SetLastError(ERROR_BAD_EXE_FORMAT);
+            fwprintf(stderr, L"[ERR] Invalid companion forwarder ABI: %s\n", companion.c_str());
+            return false;
+        }
+    }
     if (!PreflightPe(systemDirectory + L"\\forwarders\\kernel32.dll", machine)) return false;
-    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll"}) {
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll", L"shlwapi.dll"}) {
         if (!PreflightPe(systemDirectory + L"\\forwarders\\" + name, machine)) return false;
     }
     return true;
@@ -791,10 +1169,26 @@ bool PreflightArchitecture(const std::wstring& payload, const std::wstring& syst
 bool InstallArchitecture(const std::wstring& payload, const std::wstring& systemDirectory) {
     if (!CopyRequiredFile(payload, systemDirectory + L"\\nanoserver_sta_shim.dll") ||
         !CopyRequiredFile(payload, systemDirectory + L"\\forwarders\\nanoserver_sta_shim.dll")) return false;
-    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll"}) {
+    std::vector<BYTE> shimBytes;
+    if (!ReadFileBuffer(payload.c_str(), shimBytes)) return false;
+    auto* shimHeaders = GetPeHeaders(shimBytes);
+    if (!shimHeaders) return false;
+    const auto& shellOrdinals = ShlwapiOrdinals(shimHeaders->FileHeader.Machine);
+    std::wstring directory = payload.substr(0, payload.find_last_of(L"\\/") + 1);
+    for (const wchar_t* name : {L"olepro32", L"comsvcs", L"mtxdm"}) {
+        std::wstring companion = directory + name + (shimHeaders->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 ?
+            L"_x86.dll" : L"_x64.dll");
+        if (!CopyRequiredFile(companion, systemDirectory + L"\\" + name + L".dll") ||
+            !CopyRequiredFile(companion, systemDirectory + L"\\forwarders\\" + name + L".dll")) return false;
+    }
+    for (const wchar_t* name : {L"user32.dll", L"ole32.dll", L"gdi32.dll", L"comctl32.dll", L"shell32.dll", L"winmm.dll", L"shlwapi.dll"}) {
         std::wstring forwarder = systemDirectory + L"\\forwarders\\" + name;
         const auto& exports = RequiredExports(name);
-        if (!PatchPeFileImports(forwarder.c_str()) || !PatchPeFileExports(forwarder.c_str(), exports) ||
+        bool isShell = wcscmp(name, L"shlwapi.dll") == 0;
+        const std::vector<OrdinalExport> noOrdinals;
+        if (!PatchPeFileImportsAndExports(forwarder.c_str(), exports, isShell ? shellOrdinals : noOrdinals,
+                wcscmp(name, L"ole32.dll") == 0) ||
+            (isShell && !VerifyOrdinalForwarders(forwarder, shellOrdinals)) ||
             !VerifyPatchedPe(forwarder.c_str(), exports) ||
             !CopyRequiredFile(forwarder, systemDirectory + L"\\" + name) ||
             !VerifyPatchedPe((systemDirectory + L"\\" + name).c_str(), exports)) {
@@ -811,6 +1205,95 @@ bool InstallArchitecture(const std::wstring& payload, const std::wstring& system
     wprintf(L"[OK] Installed and verified shim in %s\n", systemDirectory.c_str());
     return true;
 }
+
+// Keep both registry views reversible until the entire installation succeeds.
+// Restore only values still equal to our writes, preserving concurrent edits.
+class DispenserRegistration {
+    struct Value {
+        const wchar_t* Name = nullptr;
+        bool Existed = false, Written = false;
+        DWORD Type = 0;
+        std::vector<BYTE> Original, Expected, Probe;
+    };
+    HKEY key_ = nullptr;
+    bool committed_ = false;
+    Value values_[2];
+
+    bool Capture(Value& value, const wchar_t* name, const wchar_t* text) {
+        value.Name = name;
+        const BYTE* start = reinterpret_cast<const BYTE*>(text);
+        value.Expected.assign(start, start + (wcslen(text) + 1) * sizeof(wchar_t));
+        value.Probe.resize(value.Expected.size());
+        DWORD size = 0;
+        LSTATUS status = RegQueryValueExW(key_, name, nullptr, &value.Type, nullptr, &size);
+        if (status == ERROR_FILE_NOT_FOUND) return true;
+        // An unexpectedly large prior value fails before either value is written.
+        if (status != ERROR_SUCCESS || size > 1024 * 1024) {
+            SetLastError(status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status);
+            return false;
+        }
+        value.Original.resize(size);
+        BYTE empty = 0;
+        status = RegQueryValueExW(key_, name, nullptr, &value.Type,
+            size ? value.Original.data() : &empty, &size);
+        if (status != ERROR_SUCCESS || size > value.Original.size()) {
+            SetLastError(status == ERROR_SUCCESS ? ERROR_MORE_DATA : status);
+            return false;
+        }
+        value.Original.resize(size);
+        value.Existed = true;
+        return true;
+    }
+
+    bool Write(Value& value) {
+        LSTATUS status = RegSetValueExW(key_, value.Name, 0, REG_SZ, value.Expected.data(),
+            static_cast<DWORD>(value.Expected.size()));
+        value.Written = status == ERROR_SUCCESS;
+        if (!value.Written) SetLastError(status);
+        return value.Written;
+    }
+
+    void Restore(Value& value) noexcept {
+        if (!value.Written) return;
+        DWORD type = 0, size = static_cast<DWORD>(value.Probe.size());
+        LSTATUS status = RegQueryValueExW(key_, value.Name, nullptr, &type, value.Probe.data(), &size);
+        if (status != ERROR_SUCCESS || type != REG_SZ || size != value.Expected.size() ||
+            memcmp(value.Probe.data(), value.Expected.data(), size)) return;
+        status = value.Existed
+            ? RegSetValueExW(key_, value.Name, 0, value.Type, value.Original.data(),
+                static_cast<DWORD>(value.Original.size()))
+            : RegDeleteValueW(key_, value.Name);
+        if (status != ERROR_SUCCESS) {
+            fwprintf(stderr, L"[ERR] Cannot restore an owned dispenser registry value (err=%ld).\n", status);
+        }
+    }
+
+public:
+    DispenserRegistration() = default;
+    DispenserRegistration(const DispenserRegistration&) = delete;
+    DispenserRegistration& operator=(const DispenserRegistration&) = delete;
+
+    ~DispenserRegistration() {
+        if (!key_) return;
+        if (!committed_) {
+            Restore(values_[1]);
+            Restore(values_[0]);
+        }
+        RegCloseKey(key_);
+    }
+
+    bool Install(const std::wstring& systemDirectory, REGSAM view) {
+        LSTATUS status = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\Classes\\CLSID\\{ECABB0C0-7F19-11D2-978E-0000F8757E2A}\\InprocServer32",
+            0, nullptr, REG_OPTION_NON_VOLATILE, KEY_QUERY_VALUE | KEY_SET_VALUE | view, nullptr, &key_, nullptr);
+        if (status != ERROR_SUCCESS) { SetLastError(status); return false; }
+        std::wstring path = systemDirectory + L"\\comsvcs.dll";
+        return Capture(values_[0], nullptr, path.c_str()) &&
+            Capture(values_[1], L"ThreadingModel", L"Both") && Write(values_[0]) && Write(values_[1]);
+    }
+
+    void Commit() noexcept { committed_ = true; }
+};
 
 const wchar_t* const kOptionalWow64RuntimeDlls[] = {
     L"msvbvm60.dll",
@@ -884,6 +1367,12 @@ int wmain(int argc, wchar_t* argv[]) {
     if (RegCloseKey(key) != ERROR_SUCCESS) return 1;
     if (!InstallArchitecture(shim64, system32) ||
         (installWow64 && !InstallArchitecture(shim86, wow64))) return 1;
+    DispenserRegistration registration64, registration32;
+    if (!registration64.Install(system32, KEY_WOW64_64KEY) ||
+        (installWow64 && !registration32.Install(wow64, KEY_WOW64_32KEY))) {
+        fwprintf(stderr, L"[ERR] Cannot register the native dispenser (err=%lu).\n", GetLastError());
+        return 1;
+    }
     for (const wchar_t* runtimeDll : presentWow64Runtimes) {
         if (!CopyRequiredFile(baseDirectory + L"\\" + runtimeDll, wow64 + L"\\" + runtimeDll)) return 1;
     }
@@ -892,5 +1381,7 @@ int wmain(int argc, wchar_t* argv[]) {
         fwprintf(stderr, L"[ERR] Cannot update KnownDLLs (err=%lu).\n", GetLastError());
         return 1;
     }
+    registration64.Commit();
+    registration32.Commit();
     return 0;
 }

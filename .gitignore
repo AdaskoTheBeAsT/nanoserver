@@ -430,6 +430,10 @@ FodyWeavers.xsd
 # Native executables and per-flavour sta-shim staging folders (rebuilt/synced locally via go.ps1 / sta-shim/build_shim.ps1)
 *.exe
 nanoserver-*/sta-shim/
+sta-shim/atom_fixture_*.dll
+nanoserver-*/Tests/native/atom_fixture_*.dll
+sta-shim/teardown_fixture_*.dll
+nanoserver-*/Tests/native/teardown_fixture_*.dll
 
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache

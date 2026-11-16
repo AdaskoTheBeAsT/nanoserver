@@ -8,6 +8,10 @@
 #endif
 #include <windows.h>
 #include <oaidl.h>
+#include <oleidl.h>
+#include <ComSvcs.h>
+#include <limits.h>
+#include <new>
 #include <stdio.h>
 #include <vector>
 #include <string>
@@ -213,6 +217,7 @@ CRITICAL_SECTION g_WindowLock;
 INIT_ONCE g_LocksOnce = INIT_ONCE_STATIC_INIT;
 DWORD g_QueueFls = FLS_OUT_OF_INDEXES;
 bool g_IsActive = false;
+bool g_AtomHooksAvailable = false;
 
 std::vector<ModuleHookState> g_HookedModules;
 std::vector<WindowClassEntry> g_WindowClasses;
@@ -250,6 +255,8 @@ const char* const kShimmedPrefixes[] = {
     "ext-ms-win-gdi-",
     "ext-ms-win-com-sta-l1-",
     "ext-ms-win-sxs-oleautomation-l1-",
+    "ext-ms-win-com-ole32-l1-",
+    "ext-ms-win-ole32-",
 };
 
 VOID CALLBACK OnQueueThreadExit(PVOID value);
@@ -1621,7 +1628,7 @@ BOOL WINAPI Shim_MessageBeep(UINT type) {
     return TRUE;
 }
 
-HRESULT WINAPI Shim_CoInitialize(LPVOID reserved) {
+extern "C" HRESULT WINAPI Shim_CoInitialize(LPVOID reserved) {
     return CoInitializeEx(reserved, 0x2 /* COINIT_APARTMENTTHREADED */);
 }
 
@@ -3897,12 +3904,30 @@ extern "C" HRESULT WINAPI Shim_SxsOleAut32RedirectTypeLibrary(
     return S_FALSE;
 }
 
+#include "legacy_compatibility.h"
+#include "atom_compatibility.h"
+#include "procedure_compatibility.h"
+#include "dispenser_compatibility.h"
+
 struct ExportMapping {
     const char* Name;
     PVOID Target;
 };
 
 const ExportMapping kExportTable[] = {
+    {"GetTextExtentExPointA", reinterpret_cast<PVOID>(Shim_GetTextExtentExPointA)},
+    {"StrCpyW", reinterpret_cast<PVOID>(Shim_StrCpyW)},
+    {"StrCatW", reinterpret_cast<PVOID>(Shim_StrCatW)},
+    {"StrCpyNW", reinterpret_cast<PVOID>(Shim_StrCpyNW)},
+    {"StrNCatW", reinterpret_cast<PVOID>(Shim_StrNCatW)},
+    {"OleInitialize", reinterpret_cast<PVOID>(Shim_OleInitialize)},
+    {"OleUninitialize", reinterpret_cast<PVOID>(Shim_OleUninitialize)},
+    {"OleRun", reinterpret_cast<PVOID>(Shim_OleRun)},
+    {"OleLockRunning", reinterpret_cast<PVOID>(Shim_OleLockRunning)},
+    {"OleSaveToStream", reinterpret_cast<PVOID>(Shim_OleSaveToStream)},
+    {"OleLoadFromStream", reinterpret_cast<PVOID>(Shim_OleLoadFromStream)},
+    {"CreateDataAdviseHolder", reinterpret_cast<PVOID>(Shim_CreateDataAdviseHolder)},
+    {"ReleaseStgMedium", reinterpret_cast<PVOID>(Shim_ReleaseStgMedium)},
     {"RegisterClassW", reinterpret_cast<PVOID>(Shim_RegisterClassW)},
     {"RegisterClassExW", reinterpret_cast<PVOID>(Shim_RegisterClassExW)},
     {"UnregisterClassW", reinterpret_cast<PVOID>(Shim_UnregisterClassW)},
@@ -4449,7 +4474,7 @@ void DiscoverPresenceCaches(ModuleHookState& state, IMAGE_SECTION_HEADER* sectio
     }
 }
 
-void TryDiscoverModuleLocked(HMODULE hMod) {
+void TryDiscoverModuleLocked(HMODULE hMod, bool atomsOnly = false) {
     if (!hMod) {
         return;
     }
@@ -4472,6 +4497,8 @@ void TryDiscoverModuleLocked(HMODULE hMod) {
     ModuleHookState state;
     state.ModuleBase = hMod;
     state.ImageSize = nt->OptionalHeader.SizeOfImage;
+    unsigned atomMask = 0;
+    unsigned procedureMask = 0;
 
     const auto& impDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (impDir.VirtualAddress != 0) {
@@ -4487,6 +4514,19 @@ void TryDiscoverModuleLocked(HMODULE hMod) {
                     continue;
                 }
                 const char* funcName = reinterpret_cast<const char*>(base + (*intPtr & 0x7FFFFFFFU) + 2);
+                if (atomsOnly) {
+                    PVOID target = ResolveProviderShimFunction(funcName);
+                    if (target) {
+                        state.ShimmedSlots.push_back(DelayLoadSlot{iatPtr, *iatPtr, target});
+                        if (!strcmp(funcName, "NtAddAtomEx")) atomMask |= 1;
+                        else if (!strcmp(funcName, "NtFindAtom")) atomMask |= 2;
+                        else if (!strcmp(funcName, "NtDeleteAtom")) atomMask |= 4;
+                        else if (!strcmp(funcName, "NtQueryInformationAtom")) atomMask |= 8;
+                        else if (!strcmp(funcName, "LdrGetProcedureAddress")) procedureMask |= 1;
+                        else if (!strcmp(funcName, "LdrGetProcedureAddressForCaller")) procedureMask |= 2;
+                    }
+                    continue;
+                }
                 if (strcmp(funcName, "ApiSetQueryApiSetPresence") == 0) {
                     state.PresenceIatSlot = iatPtr;
                     state.OriginalPresenceThunk = g_OrigPresence
@@ -4513,7 +4553,7 @@ void TryDiscoverModuleLocked(HMODULE hMod) {
     }
 
     const auto& delayDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-    if (delayDir.VirtualAddress != 0) {
+    if (!atomsOnly && delayDir.VirtualAddress != 0) {
         auto* desc = reinterpret_cast<DelayLoadDescriptor*>(base + delayDir.VirtualAddress);
         for (; desc->DllNameRva != 0; ++desc) {
             const char* dllName = reinterpret_cast<const char*>(base + desc->DllNameRva);
@@ -4543,6 +4583,24 @@ void TryDiscoverModuleLocked(HMODULE hMod) {
         DiscoverPresenceCaches(state, sections, nt->FileHeader.NumberOfSections);
     }
 
+    if (atomsOnly) {
+        if (atomMask != 0xF) {
+            state.ShimmedSlots.erase(std::remove_if(state.ShimmedSlots.begin(), state.ShimmedSlots.end(),
+                [](const DelayLoadSlot& slot) {
+                    return slot.ShimTarget == reinterpret_cast<PVOID>(Shim_NtAddAtomEx) ||
+                        slot.ShimTarget == reinterpret_cast<PVOID>(Shim_NtFindAtom) ||
+                        slot.ShimTarget == reinterpret_cast<PVOID>(Shim_NtDeleteAtom) ||
+                        slot.ShimTarget == reinterpret_cast<PVOID>(Shim_NtQueryInformationAtom);
+                }), state.ShimmedSlots.end());
+        }
+        if (state.ShimmedSlots.empty()) return;
+        auto address = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GlobalAddAtomW");
+        HMODULE provider = nullptr;
+        if (address && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(address), &provider) &&
+            provider == hMod && atomMask == 0xF) g_AtomHooksAvailable = true;
+        if (procedureMask == 3 && hMod == g_ProcedureApi.KernelBase) g_ProcedureHooksAvailable = true;
+    }
     g_HookedModules.push_back(state);
 }
 
@@ -4581,12 +4639,16 @@ bool ApplyModuleState(ModuleHookState& state, bool enableShim) {
 
 void RefreshHooksLocked() {
     EnsureOriginalFunctionsResolved();
+    InitOnceExecuteOnce(&g_ProcedureApiOnce, InitializeProcedureApi, nullptr, nullptr);
     TryDiscoverModuleLocked(GetModuleHandleW(L"combase.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"user32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"ole32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"gdi32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"oleaut32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"shcore.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"kernel32legacy.dll"), true);
+    TryDiscoverModuleLocked(GetModuleHandleW(L"kernel32.dll"), true);
+    TryDiscoverModuleLocked(GetModuleHandleW(L"kernelbase.dll"), true);
 
     bool enable = !IsOsShimDisabledByEnv();
     g_IsActive = enable;
@@ -4690,6 +4752,9 @@ extern "C" void WINAPI NanoServerStaShim_RestoreOriginal() {
     TryDiscoverModuleLocked(GetModuleHandleW(L"gdi32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"oleaut32.dll"));
     TryDiscoverModuleLocked(GetModuleHandleW(L"shcore.dll"));
+    TryDiscoverModuleLocked(GetModuleHandleW(L"kernel32legacy.dll"), true);
+    TryDiscoverModuleLocked(GetModuleHandleW(L"kernel32.dll"), true);
+    TryDiscoverModuleLocked(GetModuleHandleW(L"kernelbase.dll"), true);
     g_IsActive = false;
     for (auto& mod : g_HookedModules) {
         ApplyModuleState(mod, false);
@@ -4705,9 +4770,28 @@ extern "C" int WINAPI NanoServerStaShim_IsActive() {
     return active;
 }
 
+// ABI 1: text extent, Unicode strings, legacy OLE, nontransactional dispenser,
+// atom-provider and unavailable-SxS-probe routing. Keep reads coherent with refresh/restore.
+extern "C" DWORD WINAPI NanoServerStaShim_GetCapabilities(DWORD abi) {
+    if (abi != 1) return 0;
+    EnsureLocksInitialized();
+    EnterCriticalSection(&g_HookLock);
+    DWORD result = g_IsActive && !IsOsShimDisabledByEnv() ?
+        (0xFu | (g_AtomHooksAvailable ? 0x10u : 0u) |
+            (g_ProcedureHooksAvailable && g_ProcedureApi.SxsUnavailable ? 0x20u : 0u)) : 0;
+    LeaveCriticalSection(&g_HookLock);
+    return result;
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     (void)lpReserved;
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        // FLS, loader callbacks and COM vtables outlive explicit DLL handles.
+        // Retain their code before registering any process-lifetime callback.
+        HMODULE resident = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(hModule), &resident))
+            return FALSE;
         DisableThreadLibraryCalls(hModule);
         EnsureLocksInitialized();
         RegisterLoaderNotification();

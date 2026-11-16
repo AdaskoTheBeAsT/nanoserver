@@ -31,6 +31,11 @@
 
   <ItemGroup>
     <None Include="..\native\NativeShimRegression.exe" Link="NativeShimRegression.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\native\ProviderLifetimeRegression.exe" Link="ProviderLifetimeRegression.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\native\AtomRegression.exe" Link="AtomRegression.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\native\AtomStaticRegression.exe" Link="AtomStaticRegression.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\native\atom_fixture_*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\native\teardown_fixture_*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\native\NativeCOM.dll" Link="NativeCOM.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\native\NativeCOM.manifest" Link="NativeCOM.manifest" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\native\NativeLifetimeProbe.dll" Link="NativeLifetimeProbe.dll" CopyToOutputDirectory="PreserveNewest" />

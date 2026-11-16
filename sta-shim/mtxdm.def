@@ -1,0 +1,3 @@
+LIBRARY mtxdm
+EXPORTS
+    GetDispenserManager=nanoserver_sta_shim.GetDispenserManager

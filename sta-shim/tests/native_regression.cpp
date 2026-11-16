@@ -3,9 +3,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <oleauto.h>
+#include <oleidl.h>
+#include <ComSvcs.h>
+#include <shlwapi.h>
+#include <algorithm>
+#include <climits>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <cwchar>
 #include <string>
 #include <thread>
@@ -936,6 +942,11 @@ void TestLegacyCalculationImports() {
     wchar_t directory[MAX_PATH]{}, path[MAX_PATH]{};
     Require(GetTempPathW(MAX_PATH, directory) != 0, "temp directory");
     Require(GetTempFileNameW(directory, L"nsh", 0, path) != 0, "temp file");
+    if (runningShim) {
+        wchar_t canonical[MAX_PATH]{};
+        Check("temp_path_listable_canonicalization", _wcsicmp(directory, L"C:\\Temp\\") == 0 &&
+            GetLongPathNameW(path, canonical, MAX_PATH) != 0);
+    }
     HANDLE file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     Require(file != INVALID_HANDLE_VALUE, "open legacy read fixture");
@@ -1121,9 +1132,14 @@ void TestModelessDialogs() {
     Drain();
 }
 
+#include "legacy_regression.h"
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc > 2 && std::wcscmp(argv[1], L"--teardown-child") == 0)
+        return RunTeardownChild(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(_wcstoui64(argv[2], nullptr, 10))));
     bool requireShim = argc > 1 && std::wcscmp(argv[1], L"--require-shim") == 0;
     runningShim = requireShim;
     HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1135,6 +1151,7 @@ int wmain(int argc, wchar_t* argv[]) {
     });
     std::printf("Native real-import regression bits=%zu requireShim=%d\n", sizeof(void*) * 8, requireShim);
     TestLegacyCalculationImports();
+    TestLegacyCompatibility(requireShim);
     TestCbtWindowAttachment();
     TestModelessDialogs();
     Require(Register(L"RTBasic") != 0, "register basic");

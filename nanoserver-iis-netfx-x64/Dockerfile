@@ -83,6 +83,11 @@ RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim --require-wow64
     && copy /Y C:\install\sta-shim\iis_service_monitor.exe C:\iis_service_monitor.exe `
     && rmdir /S /Q C:\install\sta-shim
 
+# Listable parent path for legacy temp-file canonicalization and IIS identities.
+ENV TEMP="C:\Temp" TMP="C:\Temp"
+RUN (if not exist C:\Temp mkdir C:\Temp) `
+    && icacls C:\Temp /grant "*S-1-5-32-545:(OI)(CI)M" "*S-1-5-32-568:(OI)(CI)M" /Q
+
 WORKDIR C:\inetpub\wwwroot
 
 EXPOSE 80

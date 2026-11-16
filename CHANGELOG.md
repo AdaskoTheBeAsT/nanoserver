@@ -6,9 +6,60 @@ applications, and build tooling.
 Versions below identify the repository and container revision, not the bundled
 .NET runtime version.
 
-## 1.7.0 - 2026-11-08
+## 1.8.0 - 2026-11-15
 
-Prepared locally; not yet published.
+### Added
+
+- CRT-free `olepro32.dll` forwarders with the classic Windows export ordinals.
+  Property-frame UI returns `E_NOTIMPL`.
+- Bounded ANSI `GetTextExtentExPointA` with fixed headless font metrics.
+- Native atom-provider routing with a process-local fallback for inaccessible
+  global atom tables, without changing kernel32 KnownDLL settings.
+- Balanced legacy OLE initialization, stream persistence, runnable-object
+  helpers, and reference-counted data-advise holders.
+- Unicode `shlwapi.dll` string exports and classic ordinal wrappers.
+- A native nontransactional, zero-retention dispenser manager, including
+  `comsvcs.dll` and `mtxdm.dll` compatibility entry points.
+- A versioned native capability query for provider selection.
+- Unavailable-SxS feature-probe routing for unmodified legacy runtime fallback.
+  This does not implement private activation contexts or assembly isolation.
+- Public-import regression coverage for persistence, advise callbacks, export
+  ordinals, atom calls from `DllMain`, and dispenser ownership and teardown.
+
+### Changed
+
+- Set `TEMP` and `TMP` to listable `C:\Temp` in all six Dockerfiles, retaining
+  user and IIS service access through SID-based ACL grants.
+- Preflight and synchronize the companion forwarders across all six contexts.
+- Set all six flavour tag scripts to `1.8.0` with `set-version.ps1`.
+- Keep ASP.NET flavours and exact runtime tag examples on .NET `10.0.15`;
+  .NET Framework flavours remain on `4.8.1`.
+
+### Fixed
+
+- Remove obsolete Windows hotpatch-compatibility metadata when rewriting OS
+  images. This avoids loader reservation tails beyond `SizeOfImage`, without
+  weakening ASLR, NX, or CFG. Reject malformed metadata before installation.
+- Prepare import and export changes together and commit each DLL once, without
+  publishing an import-only intermediate image. Skip byte-identical reinstalls
+  and reject invalid export data before changing the live file.
+- Unlink verified installer backups with POSIX semantics. A guarded POSIX
+  replacement handles supported mapped-backup refusals without truncating
+  existing image views or ignoring read-only attributes. Any remaining cleanup
+  failure still fails installation.
+- Pin native callback code before registering FLS and loader notifications, so
+  releasing the last explicit module handle cannot leave dangling callbacks.
+  Cover the release in a kernel32-only child and repeat installation while all
+  eight rewritten forwarders remain mapped, including full process teardown.
+
+### Qualification
+
+- All six four-mode test runs pass. Full `1.8.0` qualification remains blocked
+  by two early x86 `STATUS_CONFLICTING_ADDRESSES` exits on the `iis-aspnet-x64`
+  candidate. Later clean diagnostic runs are not a fix. See the exact results,
+  candidate image IDs, and limits in [`docs/plan-2026-11-14.md`](docs/plan-2026-11-14.md).
+
+## 1.7.0 - 2026-11-08
 
 ### Added
 

@@ -23,7 +23,7 @@ $saved = @{ Path = $env:PATH; Include = $env:INCLUDE; Lib = $env:LIB }
 try {
     $env:INCLUDE = "$msvc\include;$kit\Include\$sdk\ucrt;$kit\Include\$sdk\shared;$kit\Include\$sdk\um"
     $architectures = if ($SyntaxOnly) { @("x86", "x64") } else { @("x64") }
-    $names = if ($SyntaxOnly) { @("installer", "monitor", "hook", "native") } else { @("installer", "monitor", "hook") }
+    $names = if ($SyntaxOnly) { @("installer", "monitor", "hook", "native", "provider_lifetime", "mapped_installer") } else { @("installer", "monitor", "hook") }
     foreach ($architecture in $architectures) {
         $env:PATH = "$msvc\bin\Hostx64\$architecture;$kit\bin\$sdk\x64;$env:SystemRoot\System32"
         $env:LIB = "$msvc\lib\$architecture;$kit\Lib\$sdk\ucrt\$architecture;$kit\Lib\$sdk\um\$architecture"

@@ -1,4 +1,25 @@
 EXPORTS
+    NanoServerStaShim_GetCapabilities
+    NanoServerStaShim_DispenserDllGetClassObject
+    NanoServerStaShim_DispenserDllCanUnloadNow
+    GetDispenserManager=Shim_GetDispenserManager
+    DispManGetContext=Shim_DispManGetContext
+    GetTextExtentExPointA=Shim_GetTextExtentExPointA
+    StrCpyW=Shim_StrCpyW
+    StrCatW=Shim_StrCatW
+    StrCpyNW=Shim_StrCpyNW
+    StrNCatW=Shim_StrNCatW
+    CoInitialize=Shim_CoInitialize
+    OleInitialize=Shim_OleInitialize
+    OleUninitialize=Shim_OleUninitialize
+    OleRun=Shim_OleRun
+    OleLockRunning=Shim_OleLockRunning
+    OleSaveToStream=Shim_OleSaveToStream
+    OleLoadFromStream=Shim_OleLoadFromStream
+    CreateDataAdviseHolder=Shim_CreateDataAdviseHolder
+    ReleaseStgMedium=Shim_ReleaseStgMedium
+    OleCreatePropertyFrame=Shim_OleCreatePropertyFrame
+    OleCreatePropertyFrameIndirect=Shim_OleCreatePropertyFrameIndirect
     _hread=Shim_hread
     QueryActCtxW=Shim_QueryActCtxW
     ApiSetQueryApiSetPresence=Shim_ApiSetQueryApiSetPresence

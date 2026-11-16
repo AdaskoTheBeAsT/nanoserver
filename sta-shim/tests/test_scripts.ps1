@@ -66,6 +66,11 @@ try {
         }
 
         $body = Get-Content -LiteralPath (Join-Path $repo "$flavour\Tests\run_all_modes.cmd") -Raw
+        [xml]$project = Get-Content -LiteralPath (Join-Path $repo "$flavour\Tests\AdaskoTheBeAsT.Interop.COM.Test\AdaskoTheBeAsT.Interop.COM.Test.csproj") -Raw
+        $lifetimeFixture = $project.SelectSingleNode('//None[@Include="..\native\ProviderLifetimeRegression.exe"]')
+        Assert-Check "${flavour}_provider_lifetime_fixture_deployed" ($null -ne $lifetimeFixture -and
+            $lifetimeFixture.GetAttribute("Link") -eq "ProviderLifetimeRegression.exe" -and
+            $lifetimeFixture.GetAttribute("CopyToOutputDirectory") -eq "PreserveNewest")
         $mocked = [regex]::Replace($body, '(?m)^cd /d C:\\tests\s*$', 'cd /d "%~dp0"')
         $mocked = $mocked.Replace('C:\tests\NativeShimRegression.exe --require-shim',
             'cmd.exe /d /c exit %FAKE_NATIVE_CODE%')
@@ -153,7 +158,7 @@ function global:docker {
     $global:LASTEXITCODE = 0
 }
 Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
-& (Join-Path $PSScriptRoot "push.ps1") -Version 1.7.0
+& (Join-Path $PSScriptRoot "push.ps1") -Version 1.8.0
 '@
     $mockPath = Join-Path $publish "mock_publish.ps1"
     Set-Content -LiteralPath $mockPath -Value $mock
@@ -166,8 +171,8 @@ Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
     Assert-Check "R13_all_six_flavours_reached" ($calls.Count -eq 42)
     foreach ($flavour in $flavours) {
         $content = Get-Content -LiteralPath (Join-Path $publish "$flavour\push.ps1") -Raw
-        Assert-Check "version_${flavour}_1_7_0" ($content.Contains("-ltsc2025-v1.7.0") -and
-            $content.Contains("-ltsc2025-v1.7") -and $content.Contains("-ltsc2025-v1"))
+        Assert-Check "version_${flavour}_1_8_0" ($content.Contains("-ltsc2025-v1.8.0") -and
+            $content.Contains("-ltsc2025-v1.8") -and $content.Contains("-ltsc2025-v1"))
     }
 } finally {
     $env:FAKE_DISM_CODE = $savedDism

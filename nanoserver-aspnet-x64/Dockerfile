@@ -1,7 +1,7 @@
 # escape=`
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
 
-ARG DOTNET_VERSION=10.0.14
+ARG DOTNET_VERSION=10.0.15
 
 SHELL ["cmd", "/S", "/C"]
 
@@ -28,6 +28,11 @@ RUN mkdir "C:\Program Files\dotnet" `
 COPY sta-shim C:\install\sta-shim
 RUN C:\install\sta-shim\install_sta_shim.exe C:\install\sta-shim `
     && rmdir /S /Q C:\install\sta-shim
+
+# Listable parent path for legacy temp-file canonicalization and IIS identities.
+ENV TEMP="C:\Temp" TMP="C:\Temp"
+RUN (if not exist C:\Temp mkdir C:\Temp) `
+    && icacls C:\Temp /grant "*S-1-5-32-545:(OI)(CI)M" "*S-1-5-32-568:(OI)(CI)M" /Q
 
 WORKDIR C:\app
 

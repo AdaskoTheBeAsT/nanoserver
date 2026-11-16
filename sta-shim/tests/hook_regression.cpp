@@ -7,6 +7,17 @@
 
 namespace {
 int failures = 0;
+unsigned procedureCalls = 0;
+ULONG procedureFlags = 0;
+PVOID procedureCaller = nullptr;
+LONG NTAPI FakeProcedure(PVOID, const AnsiProcedureName*, ULONG, PVOID* output) {
+    ++procedureCalls; *output = reinterpret_cast<PVOID>(0x1234); return 0;
+}
+LONG NTAPI FakeProcedureForCaller(PVOID module, const AnsiProcedureName* name, ULONG ordinal,
+                                 PVOID* output, ULONG flags, PVOID caller) {
+    procedureFlags = flags; procedureCaller = caller;
+    return FakeProcedure(module, name, ordinal, output);
+}
 void Check(const char* name, bool success) {
     std::printf("CHECK %s %s\n", name, success ? "PASS" : "FAIL");
     if (!success) ++failures;
@@ -22,6 +33,36 @@ void Relative(BYTE* location, const BYTE* origin, const void* target) {
 } // namespace
 
 int main() {
+    ProcedureApi originalApi = g_ProcedureApi;
+    g_ProcedureApi.Kernel32 = reinterpret_cast<HMODULE>(0x1000);
+    g_ProcedureApi.KernelBase = reinterpret_cast<HMODULE>(0x2000);
+    g_ProcedureApi.Get = FakeProcedure;
+    g_ProcedureApi.GetForCaller = FakeProcedureForCaller;
+    g_ProcedureApi.SxsUnavailable = true;
+    wchar_t savedDisable[64]{};
+    DWORD savedLength = GetEnvironmentVariableW(L"NANOSERVER_DISABLE_STA_SHIM", savedDisable, _countof(savedDisable));
+    SetEnvironmentVariableW(L"NANOSERVER_DISABLE_STA_SHIM", L"0");
+    const char feature[] = "FindActCtxSectionStringW";
+    AnsiProcedureName featureName{sizeof(feature) - 1, sizeof(feature), feature};
+    PVOID target = reinterpret_cast<PVOID>(1);
+    Check("sxs_nonfunctional_dynamic_api_is_unavailable",
+        Shim_LdrGetProcedureAddress(g_ProcedureApi.Kernel32, &featureName, 0, &target) ==
+            static_cast<LONG>(0xC000007Au) && !target && !procedureCalls);
+    AnsiProcedureName shortName{1, 1, "F"};
+    Check("sxs_bounded_name_pass_through",
+        Shim_LdrGetProcedureAddress(g_ProcedureApi.Kernel32, &shortName, 0, &target) == 0 && target);
+    Check("sxs_unrelated_module_preserved",
+        Shim_LdrGetProcedureAddress(reinterpret_cast<PVOID>(0x3000), &featureName, 0, &target) == 0 && target);
+    g_ProcedureApi.SxsUnavailable = false;
+    Check("sxs_functional_os_api_preserved",
+        Shim_LdrGetProcedureAddress(g_ProcedureApi.Kernel32, &featureName, 0, &target) == 0 && target);
+    g_ProcedureApi.SxsUnavailable = true;
+    SetEnvironmentVariableW(L"NANOSERVER_DISABLE_STA_SHIM", L"1");
+    Check("sxs_disable_preserves_os_api", Shim_LdrGetProcedureAddressForCaller(g_ProcedureApi.Kernel32,
+        &featureName, 0, &target, 7, reinterpret_cast<PVOID>(0x4000)) == 0 && target &&
+        procedureFlags == 7 && procedureCaller == reinterpret_cast<PVOID>(0x4000));
+    SetEnvironmentVariableW(L"NANOSERVER_DISABLE_STA_SHIM", savedLength && savedLength < _countof(savedDisable) ? savedDisable : nullptr);
+    g_ProcedureApi = originalApi;
     auto* memory = static_cast<BYTE*>(VirtualAlloc(nullptr, 0x4000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!memory) return 2;
     ModuleHookState state;
