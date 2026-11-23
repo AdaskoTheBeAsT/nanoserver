@@ -1,13 +1,13 @@
-# 🚀 Windows Nano Server 2025 — IIS 10, ASP.NET Core 10 & .NET Framework 4.8.1 (`x86` & `x64`)
+# 🚀 Windows Nano Server 2025 — IIS 10, ASP.NET Core 11 & .NET Framework 4.8.1 (`x86` & `x64`)
 
 **Run the "impossible" .NET workloads on Windows Nano Server 2025 (`ltsc2025`).**
 
-Current repository revision: **`1.8.0`**.
+This README describes the **`2.0.0`** build configuration. See [what's new in `2.0.0`](#whats-new-in-v200) and [what changed in `1.8.0`](#whats-new-in-v180).
 
 This repository provides community-maintained, reusable **Nano Server 2025 base images** (and sample `HealthApi` apps) published to a single unified Docker Hub repository (**`adaskothebeast/nanoserver`**) for the exact .NET scenarios where Microsoft's official images normally force you onto massive **5–8 GB Windows Server Core** containers:
 
-- ⚡ **32-bit (`x86`) & 64-bit (`x64`) ASP.NET Core 10** — Self-hosted **Kestrel** (with built-in COM STA & Win32 message-queue shim) & **IIS 10 (`OutOfProcess` / `InProcess`)**
-- 🌐 **64-bit (`x64`) ASP.NET Core 10 on IIS 10** — **`InProcess`** & **`OutOfProcess`** via ANCM V2
+- ⚡ **32-bit (`x86`) & 64-bit (`x64`) ASP.NET Core 11** — Self-hosted **Kestrel** with the built-in COM STA & Win32 message-queue shim
+- 🌐 **32-bit (`x86`) & 64-bit (`x64`) ASP.NET Core 11 on IIS 10** — **`OutOfProcess`** on x86 and **`InProcess`** or **`OutOfProcess`** on x64 via ANCM V2
 - 🏛️ **32-bit (`x86`) & 64-bit (`x64`) Full .NET Framework 4.8.1 (`net481`) on IIS 10** — Full `System.Web` / ASP.NET Web API / MVC / WebForms
 
 ---
@@ -38,9 +38,9 @@ If you have ever tried to containerize a real-world enterprise .NET application 
   - `mcr.microsoft.com/windows/servercore:ltsc2025` starts at **4.85 GB** *before* adding IIS, .NET Framework 4.8.1, or ASP.NET Core (which pushes images to **5.5–8 GB**).
   - These Nano Server 2025 images weigh in at **1.41 GB – 2.48 GB** *including* WoW64, IIS 10, and the .NET runtime — saving gigabytes on every CI/CD pull and AKS/ECS node.
 - ⚡ **Dramatically Faster CI/CD Builds & Cold Starts:**
-  - Because the heavy OS feature installation (`IIS`, `WOWSupport`, `ANCM V2`, `.NET 10` / `.NET 4.8.1`) is baked into a **pre-built Base Host Image**, your application `Dockerfile` only copies your compiled `bin/` output. App container builds finish in **seconds**, not minutes.
+  - Because the heavy OS feature installation (`IIS`, `WOWSupport`, `ANCM V2`, `.NET 11` / `.NET Framework 4.8.1`) is baked into a **pre-built Base Host Image**, your application `Dockerfile` only copies your compiled `bin/` output. App container builds finish in **seconds**, not minutes.
 - 🔌 **32-bit (`x86`) Native Interop Without the Bloated OS:**
-  - Need to P/Invoke a legacy 32-bit C/C++/Delphi/PowerBasic DLL, hardware SDK, calculation engine, or x86 driver from ASP.NET Core 10 or .NET 4.8.1? The **WoW64 subsystem (`SysWOW64`)** is pre-installed and ready.
+  - Need to P/Invoke a legacy 32-bit C/C++/Delphi/PowerBasic DLL, hardware SDK, calculation engine, or x86 driver from ASP.NET Core 11 or .NET Framework 4.8.1? The **WoW64 subsystem (`SysWOW64`)** is pre-installed and ready.
 - 🌐 **Real IIS 10 + ANCM V2 on Nano Server:**
   - Keep your existing `web.config`, IIS application pools, `InProcess` / `OutOfProcess` ANCM V2 hosting, and classic `System.Web` pipeline (`Integrated` mode) running inside a minimal Nano Server container.
 - 🔒 **Smaller Attack Surface & Less Memory Overhead:**
@@ -111,14 +111,14 @@ docker build -t ahu-nano-compat:local .\nanoserver-aspnet-x86
 
 Use a separate local image tag when validating application changes.
 
-*(Note: While Microsoft publishes `mcr.microsoft.com/dotnet/aspnet:10.0-nanoserver-ltsc2025` for 64-bit Kestrel, it lacks COM Single-Threaded Apartment (`STA`) and Win32 message-queue support. `nanoserver-aspnet-x64` provides an ultra-slim **697 MB** 64-bit Kestrel image with the native STA & message-queue shim pre-installed.)*
+The x64 Kestrel flavour includes the native STA and message-queue shim that stock Nano Server lacks. The image sizes below are historical measurements, not measurements of `2.0.0`.
 
 | Folder | Docker Hub Tag (`adaskothebeast/nanoserver`) | Runtime | Web Server & Hosting | Bitness | Image Size | Port |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 📁 [`nanoserver-aspnet-x86`](./nanoserver-aspnet-x86) | `:aspnet-x86` | **ASP.NET Core 10.0** (`win-x86`) | **Kestrel** (Self-hosted) | 32-bit (`x86`) | **1.47 GB** | `8080` |
-| 📁 [`nanoserver-aspnet-x64`](./nanoserver-aspnet-x64) | `:aspnet-x64` | **ASP.NET Core 10.0** (`win-x64`) | **Kestrel** (Self-hosted) | 64-bit (`x64`) | **697 MB** | `8080` |
-| 📁 [`nanoserver-iis-aspnet-x86`](./nanoserver-iis-aspnet-x86) | `:iis-aspnet-x86` | **ASP.NET Core 10.0** (`win-x86`) | **IIS 10** + ANCM V2 (`OutOfProcess`) | 64-bit IIS ➡️ 32-bit `dotnet.exe` | **2.58 GB** | `80` |
-| 📁 [`nanoserver-iis-aspnet-x64`](./nanoserver-iis-aspnet-x64) | `:iis-aspnet-x64` | **ASP.NET Core 10.0** (`win-x64`) | **IIS 10** + ANCM V2 (`InProcess` / `OutOfProcess`) | 64-bit (`x64`) | **2.39 GB** | `80` |
+| 📁 [`nanoserver-aspnet-x86`](./nanoserver-aspnet-x86) | `:aspnet-x86` | **ASP.NET Core 11.0** (`win-x86`) | **Kestrel** (Self-hosted) | 32-bit (`x86`) | **1.47 GB** | `8080` |
+| 📁 [`nanoserver-aspnet-x64`](./nanoserver-aspnet-x64) | `:aspnet-x64` | **ASP.NET Core 11.0** (`win-x64`) | **Kestrel** (Self-hosted) | 64-bit (`x64`) | **697 MB** | `8080` |
+| 📁 [`nanoserver-iis-aspnet-x86`](./nanoserver-iis-aspnet-x86) | `:iis-aspnet-x86` | **ASP.NET Core 11.0** (`win-x86`) | **IIS 10** + ANCM V2 (`OutOfProcess`) | 64-bit IIS ➡️ 32-bit `dotnet.exe` | **2.58 GB** | `80` |
+| 📁 [`nanoserver-iis-aspnet-x64`](./nanoserver-iis-aspnet-x64) | `:iis-aspnet-x64` | **ASP.NET Core 11.0** (`win-x64`) | **IIS 10** + ANCM V2 (`InProcess` / `OutOfProcess`) | 64-bit (`x64`) | **2.39 GB** | `80` |
 | 📁 [`nanoserver-iis-netfx-x86`](./nanoserver-iis-netfx-x86) | `:iis-netfx-x86` | **.NET Framework 4.8.1** (`net481`) | **IIS 10** (`System.Web` Integrated) | 32-bit (`x86` `w3wp.exe`) | **2.04 GB** | `80` |
 | 📁 [`nanoserver-iis-netfx-x64`](./nanoserver-iis-netfx-x64) | `:iis-netfx-x64` | **.NET Framework 4.8.1** (`net481`) | **IIS 10** (`System.Web` Integrated) | 64-bit (`x64` `w3wp.exe`) | **2.03 GB** | `80` |
 
@@ -132,11 +132,11 @@ Every folder is cleanly separated into three parts:
    - Built once and pushed to Docker Hub (`adaskothebeast/nanoserver:<flavour>`).
    - Uses `.dockerignore` to ignore `HealthApi\` and `Tests\` so application or test changes never trigger a base image rebuild.
 2. 🚀 **Part 2 — Sample `HealthApi` Container (`<folder>\HealthApi\Dockerfile`)**
-   - Compiles `HealthApi.csproj` using `mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025` as a multi-stage build step.
+   - Compiles `HealthApi.csproj` using `mcr.microsoft.com/dotnet/sdk:11.0-windowsservercore-ltsc2025` as a multi-stage build step.
    - Layers the published output onto `FROM adaskothebeast/nanoserver:<flavour>`.
    - Serves `GET /health` ➡️ `200 OK` `{"status":"Healthy"}`.
 3. 🧪 **Part 3 — Self-Contained COM & STA Test Suite (`<folder>\Tests\Dockerfile`)**
-   - Contains C++ ATL COM server source (`Tests\src\NativeCOM\`), native lifetime-probe source (`Tests\src\NativeLifetimeProbe\`), prebuilt fixtures (`Tests\native\`), and the managed suite (`Tests\AdaskoTheBeAsT.Interop.COM.Test\`). The managed library is the `AdaskoTheBeAsT.Interop.COM` 4.2.0 NuGet package, not source in `Tests\src`.
+   - Contains C++ ATL COM server source (`Tests\src\NativeCOM\`), native lifetime-probe source (`Tests\src\NativeLifetimeProbe\`), prebuilt fixtures (`Tests\native\`), and the managed suite (`Tests\AdaskoTheBeAsT.Interop.COM.Test\`). The managed library is the `AdaskoTheBeAsT.Interop.COM` 5.0.0 NuGet package, not source in `Tests\src`.
    - Runs `NativeShimRegression.exe --require-shim` in a fresh process before the managed modes. Its shared source is `sta-shim\tests\native_regression.cpp`; normal `user32.dll` imports avoid managed interception and report final call targets.
    - Builds and executes all unit tests inside `FROM adaskothebeast/nanoserver:<flavour>` across all 4 STA shim toggle modes (`Default`, `OS-Level STA Shim Only`, `Library In-Process STA Shim Only`, and `Both Disabled + Runtime Toggle`).
 
@@ -207,54 +207,78 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v1.8.0`, `-v1.8`, `-v1`).
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v2.0.0`, `-v2.0`, `-v2`). The examples below show what the scripts are configured to push, not which tags are already published.
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v1.8.0, -v1.8, and -v1
-.\set-version.ps1 -Version 1.8.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v2.0.0, -v2.0, and -v2
+.\set-version.ps1 -Version 2.0.0
 
-# Optional: also bump the .NET 10 runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 1.8.0 -DotNetVersion 10.0.15
+# Optional: also set the .NET runtime version in Dockerfiles & push.ps1 files
+.\set-version.ps1 -Version 2.0.0 -DotNetVersion 11.0.0
 ```
 
-- **ASP.NET Core 10 (`x86` Kestrel):**
+- **ASP.NET Core 11 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0.15-ltsc2025-v1.8.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-10.0-ltsc2025-v1.8`
-  - `adaskothebeast/nanoserver:aspnet-x86-10-ltsc2025-v1`
-- **ASP.NET Core 10 (`x64` Kestrel):**
+  - `adaskothebeast/nanoserver:aspnet-x86-11.0.0-ltsc2025-v2.0.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-11-ltsc2025-v2`
+- **ASP.NET Core 11 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0.15-ltsc2025-v1.8.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-10.0-ltsc2025-v1.8`
-  - `adaskothebeast/nanoserver:aspnet-x64-10-ltsc2025-v1`
-- **IIS 10 + ASP.NET Core 10 (`x86` OutOfProcess):**
+  - `adaskothebeast/nanoserver:aspnet-x64-11.0.0-ltsc2025-v2.0.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-11-ltsc2025-v2`
+- **IIS 10 + ASP.NET Core 11 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0.15-ltsc2025-v1.8.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10.0-ltsc2025-v1.8`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-10-ltsc2025-v1`
-- **IIS 10 + ASP.NET Core 10 (`x64` InProcess / OutOfProcess):**
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-11.0.0-ltsc2025-v2.0.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-11-ltsc2025-v2`
+- **IIS 10 + ASP.NET Core 11 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0.15-ltsc2025-v1.8.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.8`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-11.0.0-ltsc2025-v2.0.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-11-ltsc2025-v2`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v1.8.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v1.8`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v1`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v2.0.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v2`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v1.8.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v1.8`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v1`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v2.0.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v2`
 
 ---
 
+## What's New in `v2.0.0`
+
+Container revision **`2.0.0`** moves the four x86 and x64 Kestrel and IIS
+ASP.NET Core flavours to **.NET and ASP.NET Core `11.0.0`**. The ASP.NET Core
+`HealthApi` samples now target `net11.0`; the two classic IIS flavours and
+their samples stay on **.NET Framework `4.8.1`**. Use images from the `1.8.0`
+line if your application still needs the bundled .NET 10 runtime.
+
+- All six managed test projects use `AdaskoTheBeAsT.Interop.COM` `5.0.0`.
+  They add `net11.0`, retain `net10.0` and .NET Framework 4.7.2, 4.8, and
+  4.8.1 targets, and drop `net8.0` and `net9.0`. New fallback tests check
+  that COM initialization matches the calling thread's apartment and is
+  balanced by uninitialization.
+- The native STA shim accepts the queue masks containing `QS_TRANSFER` that
+  `CoWaitForMultipleHandles` uses. Native regression tests check that an STA
+  can process the final release of a COM object marshaled to another thread,
+  both when the release is queued before the wait and when it arrives during it.
+
 ## What's New in `v1.8.0`
 
-Container revision **`1.8.0`** extends native headless compatibility with:
+Container revision **`1.8.0`** keeps ASP.NET Core on **`10.0.15`** and the
+classic IIS images on **.NET Framework `4.8.1`**. It helps legacy components
+initialize and run headlessly with more OLE and Win32 support, a writable
+`C:\Temp`, and safer installer updates. See the
+[full `1.8.0` changelog](./CHANGELOG.md#180---2026-11-15) for the complete list.
+
+Native compatibility changes include:
 
 - An `olepro32.dll` forwarder with Windows-compatible names and ordinals.
   Property-frame UI returns `E_NOTIMPL`; it does not display or simulate a UI.
@@ -428,10 +452,9 @@ and `WAS`/`W3SVC` host-loss qualification pass across all six flavours; see
 | Registration-free TypeLib redirection (`v1.4.0+`) | Hooks `oleaut32.dll` (`ext-ms-win-sxs-oleautomation-l1-1-0!SxsOleAut32RedirectTypeLibrary`) and scans loaded modules in the current process for embedded `TYPELIB` resources matching the requested `LIBID` via `LoadTypeLibEx(..., REGKIND_NONE, ...)` | Resolves `TYPELIB` resources embedded in already-loaded process DLLs; external standalone `.tlb` files that are not loaded as modules require explicit loading or registry entries. |
 | Hook memory protection (R17, R19) | Serialized writes, no-op skipping, derived-address bounds checks and original page-protection restoration | Non-executable data pages become writable without execute access. An already-executable page may briefly become writable and executable. This is not a blanket W^X guarantee. |
 
-The `AdaskoTheBeAsT.Interop.COM` **4.2.0** package remains pinned in the managed tests.
-Its `NanoServerWindowManager` tests document that package's known deviations,
-including duplicate registration and timeout fallback behavior. They are not native
-shim conformance tests and are not rewritten to pretend the package has been fixed.
+The managed suite's `NanoServerWindowManager` tests cover the NuGet package's
+behavior, including duplicate registration and timeout fallback. They are not
+native shim conformance tests.
 
 The native and managed shims keep separate class/window state. Select a provider
 before COM/window initialization and use a new process when changing providers.

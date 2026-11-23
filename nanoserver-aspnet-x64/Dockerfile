@@ -1,7 +1,7 @@
 # escape=`
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
 
-ARG DOTNET_VERSION=10.0.15
+ARG DOTNET_VERSION=11.0.0
 
 SHELL ["cmd", "/S", "/C"]
 

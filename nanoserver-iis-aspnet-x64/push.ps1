@@ -1,17 +1,17 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-docker image tag adaskothebeast/nanoserver:iis-aspnet-x64 adaskothebeast/nanoserver:iis-aspnet-x64-10.0.15-ltsc2025-v1.8.0
+docker image tag adaskothebeast/nanoserver:iis-aspnet-x64 adaskothebeast/nanoserver:iis-aspnet-x64-11.0.0-ltsc2025-v2.0.0
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-docker image tag adaskothebeast/nanoserver:iis-aspnet-x64 adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.8
+docker image tag adaskothebeast/nanoserver:iis-aspnet-x64 adaskothebeast/nanoserver:iis-aspnet-x64-11.0-ltsc2025-v2.0
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-docker image tag adaskothebeast/nanoserver:iis-aspnet-x64 adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1
+docker image tag adaskothebeast/nanoserver:iis-aspnet-x64 adaskothebeast/nanoserver:iis-aspnet-x64-11-ltsc2025-v2
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 docker image push adaskothebeast/nanoserver:iis-aspnet-x64
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-docker image push adaskothebeast/nanoserver:iis-aspnet-x64-10.0.15-ltsc2025-v1.8.0
+docker image push adaskothebeast/nanoserver:iis-aspnet-x64-11.0.0-ltsc2025-v2.0.0
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-docker image push adaskothebeast/nanoserver:iis-aspnet-x64-10.0-ltsc2025-v1.8
+docker image push adaskothebeast/nanoserver:iis-aspnet-x64-11.0-ltsc2025-v2.0
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-docker image push adaskothebeast/nanoserver:iis-aspnet-x64-10-ltsc2025-v1
+docker image push adaskothebeast/nanoserver:iis-aspnet-x64-11-ltsc2025-v2
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -1,9 +1,9 @@
 # escape=`
-ARG DOTNET_VERSION=10.0.15
+ARG DOTNET_VERSION=11.0.0
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer
+FROM mcr.microsoft.com/dotnet/sdk:11.0-windowsservercore-ltsc2025 AS installer
 
-ARG DOTNET_VERSION=10.0.15
+ARG DOTNET_VERSION=11.0.0
 
 SHELL ["cmd", "/S", "/C"]
 WORKDIR C:\src
@@ -51,7 +51,7 @@ RUN DISM /Online /Get-Capabilities >nul `
     && (if exist C:\Windows\SysWOW64\ntdll.dll (echo WOW64 installed) else (echo WOW64 missing && exit /b 1)) `
     && (if exist C:\Windows\System32\inetsrv\appcmd.exe (echo IIS installed) else (echo IIS/appcmd missing && exit /b 1))
 
-ARG DOTNET_VERSION=10.0.15
+ARG DOTNET_VERSION=11.0.0
 
 # Extract the x64 runtimes directly; Nano Server cannot run the EXE setup engine.
 ENV DOTNET_ROOT="C:\Program Files\dotnet"

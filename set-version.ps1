@@ -10,14 +10,14 @@
     and updates both the `docker image tag` and `docker image push` commands
     across every nanoserver-* subfolder's push.ps1 file.
 
-    Optionally accepts -DotNetVersion (e.g. 10.0.14) and -NetFxVersion (e.g. 4.8.1)
+    Optionally accepts -DotNetVersion (e.g. 11.0.0) and -NetFxVersion (e.g. 4.8.1)
     to update the runtime version segments at the same time.
 
 .EXAMPLE
     .\set-version.ps1 -Version 1.1.0
 
 .EXAMPLE
-    .\set-version.ps1 1.2.3 -DotNetVersion 10.0.14
+    .\set-version.ps1 1.2.3 -DotNetVersion 11.0.0
 #>
 [CmdletBinding()]
 param(
@@ -25,7 +25,7 @@ param(
     [ValidatePattern('^v?\d+\.\d+\.\d+$')]
     [string]$Version,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Optional .NET runtime version in x.x.x format (default: read from Dockerfile or 10.0.14).")]
+    [Parameter(Mandatory = $false, HelpMessage = "Optional .NET runtime version in x.x.x format (default: read from Dockerfile or 11.0.0).")]
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$DotNetVersion,
 
@@ -76,7 +76,7 @@ foreach ($f in $flavours) {
             }
         }
     } else {
-        $rtFull = "10.0.14"
+        $rtFull = "11.0.0"
         if (Test-Path $dockerfilePath) {
             $match = [regex]::Match((Get-Content $dockerfilePath -Raw), '(?m)^ARG\s+DOTNET_VERSION=(\d+\.\d+\.\d+)')
             if ($match.Success) {

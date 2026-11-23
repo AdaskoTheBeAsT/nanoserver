@@ -436,7 +436,9 @@ bool WriteInt32WithProtection(int* address, int value) {
     return WriteWithProtection(address, value);
 }
 
-constexpr UINT kAllQueueBits = 0x1DFFu;
+// Matches user32!GetQueueStatus valid mask (~0xFFFFA200u = 0x5DFFu), including
+// QS_TRANSFER (0x4000u) used by combase!CoWaitForMultipleHandles (0x5DFF / 0x5CFF).
+constexpr UINT kAllQueueBits = 0x5DFFu;
 constexpr UINT kPostedBits = QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
 
 std::shared_ptr<ThreadMessageQueue> FindQueueLocked(DWORD threadId) {

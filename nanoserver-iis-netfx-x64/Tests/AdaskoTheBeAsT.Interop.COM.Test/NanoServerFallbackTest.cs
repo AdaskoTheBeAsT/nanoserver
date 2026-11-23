@@ -40,7 +40,7 @@ public class NanoServerFallbackTest
                 pumpPendingMessages: false,
                 api);
 
-            executeResult.Success.Should().BeTrue("activation should succeed, but returned {0}", executeResult.Exception);
+            executeResult.Success.Should().BeTrue();
             executeOutput.Should().Be("Hello, Nano Server!");
 
             Action createOutsideContext = () => _ = new NativeCOM.StringConcatenatorClass();
@@ -141,7 +141,7 @@ public class NanoServerFallbackTest
     }
 
     [Fact]
-    public void FallbackShouldRetryWithIUnknownAndAutoInitializeMtaWhenNeeded()
+    public void FallbackShouldRetryWithIUnknownAndAutoInitializeStaOnStaThread()
     {
         TestWindow.OnStaThread(() =>
         {
@@ -158,16 +158,70 @@ public class NanoServerFallbackTest
                 () =>
                 {
                     var obj = new NativeCOM.StringConcatenatorClass();
-                    output = obj.ConcatStrings("MTA ", "Retry");
+                    output = obj.ConcatStrings("STA ", "Retry");
                 },
                 pumpPendingMessages: false,
                 api);
 
             result.Success.Should().BeTrue();
-            output.Should().Be("MTA Retry");
-            api.MtaInitializedCount.Should().Be(1);
+            output.Should().Be("STA Retry");
+            api.StaInitializedCount.Should().Be(1);
+            api.MtaInitializedCount.Should().Be(0);
+            api.UninitializeCount.Should().Be(1);
             api.GetClassObjectCallCount.Should().Be(2);
         });
+    }
+
+    [Fact]
+    public void FallbackShouldRetryWithIUnknownAndAutoInitializeMtaOnMtaThreadForFreeThreadedManifest()
+    {
+        Exception? threadFailure = null;
+        var thread = new Thread(() =>
+        {
+            var tempManifest = Path.Combine(Path.GetTempPath(), "FreeManifest_" + Guid.NewGuid().ToString("N") + ".manifest");
+            try
+            {
+                File.WriteAllText(
+                    tempManifest,
+                    $"""
+                    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                    <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+                      <file name="NativeCOM.dll">
+                        <comClass clsid="{ConcatenatorClsid}" threadingModel="Both" />
+                      </file>
+                    </assembly>
+                    """);
+
+                var api = new SimulatedNanoServerApi
+                {
+                    ReturnNoInterfaceOnFirstGetClassObject = true,
+                    ReturnNotInitializedOnFirstRegister = true,
+                };
+                var descriptors = new[] { new ComPathDescriptor(AssemblyPath, tempManifest) };
+
+                var result = Executor.Execute(descriptors, () => { }, pumpPendingMessages: false, api);
+                result.Success.Should().BeTrue();
+                api.MtaInitializedCount.Should().Be(1);
+                api.StaInitializedCount.Should().Be(0);
+                api.UninitializeCount.Should().Be(1);
+                api.GetClassObjectCallCount.Should().Be(2);
+            }
+            catch (Exception ex)
+            {
+                threadFailure = ex;
+            }
+            finally
+            {
+                if (File.Exists(tempManifest))
+                {
+                    File.Delete(tempManifest);
+                }
+            }
+        });
+        thread.SetApartmentState(ApartmentState.MTA);
+        thread.Start();
+        thread.Join();
+        threadFailure.Should().BeNull();
     }
 
     [Fact]
@@ -542,7 +596,11 @@ public class NanoServerFallbackTest
 
         internal int GetClassObjectCallCount { get; private set; }
 
+        internal int StaInitializedCount { get; private set; }
+
         internal int MtaInitializedCount { get; private set; }
+
+        internal int UninitializeCount { get; private set; }
 
         internal int ReleasedFactoriesCount { get; private set; }
 
@@ -610,10 +668,21 @@ public class NanoServerFallbackTest
             return hr;
         }
 
+        internal override int InitializeSingleThreadedApartment()
+        {
+            StaInitializedCount++;
+            return 0;
+        }
+
         internal override int InitializeMultithreadedApartment()
         {
             MtaInitializedCount++;
             return 0;
+        }
+
+        internal override void UninitializeApartment()
+        {
+            UninitializeCount++;
         }
 
         internal override int RevokeClassObject(uint registrationToken)

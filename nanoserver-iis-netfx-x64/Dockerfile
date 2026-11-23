@@ -1,5 +1,5 @@
 # escape=`
-FROM mcr.microsoft.com/dotnet/sdk:10.0-windowsservercore-ltsc2025 AS installer
+FROM mcr.microsoft.com/dotnet/sdk:11.0-windowsservercore-ltsc2025 AS installer
 
 SHELL ["cmd", "/S", "/C"]
 

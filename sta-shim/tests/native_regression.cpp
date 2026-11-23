@@ -487,6 +487,20 @@ void TestTimersWaitsAndQuit() {
     DWORD second = GetQueueStatus(QS_POSTMESSAGE);
     Check("R06_queue_status_changed_and_current", LOWORD(first) == QS_POSTMESSAGE && HIWORD(first) == QS_POSTMESSAGE &&
         LOWORD(second) == 0 && HIWORD(second) == QS_POSTMESSAGE);
+    SetLastError(0);
+    DWORD transferAll = GetQueueStatus(0x5DFFu);
+    DWORD transferInput = GetQueueStatus(0x5CFFu);
+    Check("R06_queue_status_transfer_mask",
+        GetLastError() == 0 &&
+        HIWORD(transferAll) == (QS_POSTMESSAGE | QS_ALLPOSTMESSAGE) &&
+        HIWORD(transferInput) == QS_POSTMESSAGE);
+    bool invalidQueueFlagsRejected = true;
+    for (UINT invalidFlag : {0x0200u, 0x2000u, 0x8000u}) {
+        SetLastError(0);
+        if (GetQueueStatus(invalidFlag) != 0 || GetLastError() != ERROR_INVALID_FLAGS)
+            invalidQueueFlagsRejected = false;
+    }
+    Check("R06_queue_status_invalid_flags", invalidQueueFlagsRejected);
     Check("R06_zero_wake_mask", MsgWaitForMultipleObjectsEx(0, nullptr, 30, 0, MWMO_INPUTAVAILABLE) == WAIT_TIMEOUT);
     Check("R06_timer_mask", MsgWaitForMultipleObjectsEx(0, nullptr, 30, QS_TIMER, MWMO_INPUTAVAILABLE) == WAIT_TIMEOUT);
     Check("R06_old_input", MsgWaitForMultipleObjectsEx(0, nullptr, 0, QS_POSTMESSAGE, 0) == WAIT_TIMEOUT);
@@ -553,6 +567,114 @@ void TestTimersWaitsAndQuit() {
     }
     DestroyWindow(window);
     CloseHandle(event);
+}
+
+class StaModalTestObject final : public IUnknown {
+public:
+    explicit StaModalTestObject(std::atomic<DWORD>* releasedTid) : releasedTid_(releasedTid) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        if (riid == IID_IUnknown) {
+            *ppvObject = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return static_cast<ULONG>(InterlockedIncrement(&refs_));
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG remaining = InterlockedDecrement(&refs_);
+        if (remaining == 0) {
+            releasedTid_->store(GetCurrentThreadId());
+            delete this;
+        }
+        return static_cast<ULONG>(remaining);
+    }
+
+private:
+    LONG refs_ = 1;
+    std::atomic<DWORD>* releasedTid_;
+};
+
+void TestComStaModalWaitMarshalRelease() {
+    std::atomic<DWORD> staTid{0};
+    std::atomic<DWORD> releasedPrePostedTid{0};
+    std::atomic<DWORD> releasedDuringWaitTid{0};
+    HRESULT hrWaitPrePosted = E_FAIL;
+    HRESULT hrWaitDuringSleep = E_FAIL;
+
+    std::thread staThread([&] {
+        Require(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "STA CoInitializeEx");
+        staTid.store(GetCurrentThreadId());
+
+        auto* obj1 = new StaModalTestObject(&releasedPrePostedTid);
+        auto* obj2 = new StaModalTestObject(&releasedDuringWaitTid);
+        IStream* stream1 = nullptr;
+        IStream* stream2 = nullptr;
+        Require(SUCCEEDED(CoMarshalInterThreadInterfaceInStream(IID_IUnknown, obj1, &stream1)) && stream1, "marshal obj1");
+        Require(SUCCEEDED(CoMarshalInterThreadInterfaceInStream(IID_IUnknown, obj2, &stream2)) && stream2, "marshal obj2");
+        obj1->Release();
+        obj2->Release();
+
+        HANDLE mta1AboutToRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE mta1Done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE startMta2 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE mta2Done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        Require(mta1AboutToRelease && mta1Done && startMta2 && mta2Done, "create COM modal wait events");
+
+        std::thread mta1([&] {
+            Require(SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)), "MTA1 CoInitializeEx");
+            IUnknown* proxy = nullptr;
+            Require(SUCCEEDED(CoGetInterfaceAndReleaseStream(stream1, IID_IUnknown, reinterpret_cast<void**>(&proxy))) && proxy,
+                "unmarshal proxy1");
+            SetEvent(mta1AboutToRelease);
+            proxy->Release();
+            SetEvent(mta1Done);
+            CoUninitialize();
+        });
+
+        std::thread mta2([&] {
+            Require(SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)), "MTA2 CoInitializeEx");
+            IUnknown* proxy = nullptr;
+            Require(SUCCEEDED(CoGetInterfaceAndReleaseStream(stream2, IID_IUnknown, reinterpret_cast<void**>(&proxy))) && proxy,
+                "unmarshal proxy2");
+            Require(WaitForSingleObject(startMta2, 5000) == WAIT_OBJECT_0, "wait startMta2");
+            Sleep(25);
+            proxy->Release();
+            SetEvent(mta2Done);
+            CoUninitialize();
+        });
+
+        Require(WaitForSingleObject(mta1AboutToRelease, 5000) == WAIT_OBJECT_0, "wait mta1AboutToRelease");
+        Sleep(25);
+        DWORD index1 = 0xFFFFFFFFu;
+        hrWaitPrePosted = CoWaitForMultipleHandles(0, 5000, 1, &mta1Done, &index1);
+
+        SetEvent(startMta2);
+        DWORD index2 = 0xFFFFFFFFu;
+        hrWaitDuringSleep = CoWaitForMultipleHandles(0, 5000, 1, &mta2Done, &index2);
+
+        mta1.join();
+        mta2.join();
+        CloseHandle(mta1AboutToRelease);
+        CloseHandle(mta1Done);
+        CloseHandle(startMta2);
+        CloseHandle(mta2Done);
+        CoUninitialize();
+    });
+    staThread.join();
+
+    DWORD expectedTid = staTid.load();
+    Check("R06_com_sta_cowait_preposted_release",
+        hrWaitPrePosted == S_OK && expectedTid != 0 && releasedPrePostedTid.load() == expectedTid);
+    Check("R06_com_sta_cowait_woken_release",
+        hrWaitDuringSleep == S_OK && expectedTid != 0 && releasedDuringWaitTid.load() == expectedTid);
 }
 
 void TestUserObjectsAndClipboard(bool shim) {
@@ -1160,6 +1282,7 @@ int wmain(int argc, wchar_t* argv[]) {
     TestSendOwnership();
     TestQueueLifetimeAndFilteredWait();
     TestTimersWaitsAndQuit();
+    TestComStaModalWaitMarshalRelease();
     TestUserObjectsAndClipboard(requireShim);
     TestAnsiAndHeadlessGdi(requireShim);
     TestRouting(requireShim);
