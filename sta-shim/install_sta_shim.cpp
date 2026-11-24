@@ -476,8 +476,8 @@ struct OrdinalExport {
 
 bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>& missingExports,
                         const std::vector<OrdinalExport>& ordinalExports = {}, bool replaceCode = false,
-                        std::vector<BYTE>* prepared = nullptr) {
-    if (missingExports.empty() && ordinalExports.empty()) {
+                        std::vector<BYTE>* prepared = nullptr, const std::vector<const char*>& replaceNames = {}) {
+    if (missingExports.empty() && ordinalExports.empty() && replaceNames.empty()) {
         return true;
     }
 
@@ -570,7 +570,9 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
     }
 
     size_t addedCount = 0;
-    for (const char* missingName : missingExports) {
+    auto exportNames = missingExports;
+    exportNames.insert(exportNames.end(), replaceNames.begin(), replaceNames.end());
+    for (const char* missingName : exportNames) {
         bool exists = false;
         WORD existingOrdIdx = 0;
         for (const auto& entry : namedExports) {
@@ -599,7 +601,8 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
                     break;
                 }
             }
-            if (!hasForwarder && replaceCode) {
+            if (!hasForwarder && (replaceCode || std::any_of(replaceNames.begin(), replaceNames.end(),
+                    [missingName](const char* name) { return strcmp(name, missingName) == 0; }))) {
                 forwarderFixups.push_back(ForwarderFixup{existingOrdIdx, shimTarget});
                 ++addedCount;
             }
@@ -800,14 +803,15 @@ bool PatchPeFileExports(const wchar_t* filePath, const std::vector<const char*>&
 }
 
 bool PatchPeFileImportsAndExports(const wchar_t* path, const std::vector<const char*>& exports,
-                                 const std::vector<OrdinalExport>& ordinals = {}, bool replaceCode = false) {
+                                 const std::vector<OrdinalExport>& ordinals = {}, bool replaceCode = false,
+                                 const std::vector<const char*>& replaceNames = {}) {
     std::vector<BYTE> bytes;
     if (!ReadFileBuffer(path, bytes)) return false;
     const auto original = bytes;
     // Never publish an import-only intermediate image. A loader can map it
     // before the export pass, preventing cleanup of that second replacement.
     if (!PatchPeFileImports(path, &bytes) ||
-        !PatchPeFileExports(path, exports, ordinals, replaceCode, &bytes)) return false;
+        !PatchPeFileExports(path, exports, ordinals, replaceCode, &bytes, replaceNames)) return false;
     if (bytes == original) {
         wprintf(L"[OK] Imports and exports already current in: %s\n", path);
         return true;
@@ -890,14 +894,19 @@ bool CopyRequiredFile(const std::wstring& source, const std::wstring& destinatio
     return true;
 }
 
+const std::vector<const char*> kGdi32HeadlessFontExports = {
+    "EnumFontFamiliesExW", "GetCharABCWidthsW", "GetCharWidthI", "GetFontData",
+    "GetGlyphOutlineW", "GetOutlineTextMetricsW", "GetTextFaceW"
+};
+
 const std::vector<const char*> kGdi32Exports = {
     "GetTextExtentExPointA",
     "CopyEnhMetaFileA", "CopyEnhMetaFileW", "GetEnhMetaFileDescriptionA", "GetEnhMetaFileDescriptionW",
     "GetTextCharacterExtra", "CreatePenIndirect", "GetTextExtentPoint32A", "SetWinMetaFileBits",
     "CopyMetaFileA", "CreateBitmapIndirect", "CreateDiscardableBitmap", "CreateEllipticRgnIndirect",
     "CreateHalftonePalette", "CreateICA", "CreatePolygonRgn", "EnumFontsA",
-    "Escape", "GetBrushOrgEx", "GetNearestColor", "GetTextExtentPointA",
-    "Pie", "PtInRegion", "ResetDCA", "RoundRect",
+    "Escape", "GetBrushOrgEx", "GetCharABCWidthsFloatW", "GetNearestColor", "GetTextExtentPointA",
+    "Pie", "PtInRegion", "ResetDCA", "ResetDCW", "RoundRect",
     "ScaleViewportExtEx", "ScaleWindowExtEx", "SetAbortProc", "SetBrushOrgEx",
     "SetPixelV", "SetWindowOrgEx", "UnrealizeObject", "WidenPath",
     "AbortPath", "AngleArc", "ArcTo", "Chord",
@@ -1186,8 +1195,11 @@ bool InstallArchitecture(const std::wstring& payload, const std::wstring& system
         const auto& exports = RequiredExports(name);
         bool isShell = wcscmp(name, L"shlwapi.dll") == 0;
         const std::vector<OrdinalExport> noOrdinals;
+        const std::vector<const char*> noReplacements;
+        const auto& replaceNames = wcscmp(name, L"gdi32.dll") == 0 ? kGdi32HeadlessFontExports : noReplacements;
         if (!PatchPeFileImportsAndExports(forwarder.c_str(), exports, isShell ? shellOrdinals : noOrdinals,
-                wcscmp(name, L"ole32.dll") == 0) ||
+                wcscmp(name, L"ole32.dll") == 0, replaceNames) ||
+            (!replaceNames.empty() && !VerifyPatchedPe(forwarder.c_str(), replaceNames)) ||
             (isShell && !VerifyOrdinalForwarders(forwarder, shellOrdinals)) ||
             !VerifyPatchedPe(forwarder.c_str(), exports) ||
             !CopyRequiredFile(forwarder, systemDirectory + L"\\" + name) ||

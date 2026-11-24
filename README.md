@@ -2,7 +2,7 @@
 
 **Run the "impossible" .NET workloads on Windows Nano Server 2025 (`ltsc2025`).**
 
-This README describes the **`2.0.0`** build configuration. See [what's new in `2.0.0`](#whats-new-in-v200) and [what changed in `1.8.0`](#whats-new-in-v180).
+This README describes the **`2.1.0`** build configuration. See [what's new in `2.1.0`](#whats-new-in-v210), [what changed in `2.0.0`](#whats-new-in-v200), and [what changed in `1.8.0`](#whats-new-in-v180).
 
 This repository provides community-maintained, reusable **Nano Server 2025 base images** (and sample `HealthApi` apps) published to a single unified Docker Hub repository (**`adaskothebeast/nanoserver`**) for the exact .NET scenarios where Microsoft's official images normally force you onto massive **5–8 GB Windows Server Core** containers:
 
@@ -111,7 +111,7 @@ docker build -t ahu-nano-compat:local .\nanoserver-aspnet-x86
 
 Use a separate local image tag when validating application changes.
 
-The x64 Kestrel flavour includes the native STA and message-queue shim that stock Nano Server lacks. The image sizes below are historical measurements, not measurements of `2.0.0`.
+The x64 Kestrel flavour includes the native STA and message-queue shim that stock Nano Server lacks. The image sizes below are historical measurements, not measurements of `2.1.0`.
 
 | Folder | Docker Hub Tag (`adaskothebeast/nanoserver`) | Runtime | Web Server & Hosting | Bitness | Image Size | Port |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -140,9 +140,8 @@ Every folder is cleanly separated into three parts:
    - Runs `NativeShimRegression.exe --require-shim` in a fresh process before the managed modes. Its shared source is `sta-shim\tests\native_regression.cpp`; normal `user32.dll` imports avoid managed interception and report final call targets.
    - Builds and executes all unit tests inside `FROM adaskothebeast/nanoserver:<flavour>` across all 4 STA shim toggle modes (`Default`, `OS-Level STA Shim Only`, `Library In-Process STA Shim Only`, and `Both Disabled + Runtime Toggle`).
 
-> ⚠️ **Note on `.exe` Binaries, `nanoserver-*/sta-shim` Staging Folders & Bitdefender False Positive (`NativeShimRegression`):**
-> All `.exe` files (`install_sta_shim.exe`, `iis_service_monitor.exe`, `NativeShimRegression_x86.exe`, `NativeShimRegression_x64.exe`, and `Tests\native\NativeShimRegression.exe`) and the per-flavour `nanoserver-*\sta-shim\` staging directories are excluded from Git via `.gitignore` and compiled/populated locally from `sta-shim\` when you run `sta-shim\build_shim.ps1`, root `.\go.ps1`, or any flavour's `.\<flavour>\go.ps1`.
-> For unknown heuristic reasons, **Bitdefender** may flag the compiled `NativeShimRegression` executable (`NativeShimRegression.exe` / `NativeShimRegression_x86.exe` / `NativeShimRegression_x64.exe`) as unsafe or suspicious. This binary is compiled directly from [`sta-shim\tests\native_regression.cpp`](./sta-shim/tests/native_regression.cpp) and only exercises local Win32 windowing, message-queue, and IAT-hook regression assertions. If Bitdefender blocks or quarantines it during local builds, add an antivirus exclusion for your working directory or for `NativeShimRegression*.exe`.
+> **Generated binaries:** The per-flavour `sta-shim\` staging directories and all `.exe` files are excluded from Git. Root `.\go.ps1` runs `.\sta-shim\build_shim.ps1` to compile and stage the runtime binaries and native test fixtures, including `NativeShimRegression.exe`.
+> Bitdefender may flag `NativeShimRegression*.exe`, which is built from [`sta-shim\tests\native_regression.cpp`](./sta-shim/tests/native_regression.cpp). If it is flagged during a test build, review the detection and report a suspected false positive to the vendor.
 
 ---
 
@@ -152,7 +151,7 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ### 1️⃣ Base Host Container (run from `<folder>\` or root `.\go.ps1` / `.\push.ps1`)
 
-- 🔨 **`go.ps1`** — Build the reusable base host image (running root `.\go.ps1` first compiles `sta-shim\build_shim.ps1` and then builds all 6 flavours):
+- 🔨 **`go.ps1`** — Build the reusable base host image (running root `.\go.ps1` first builds the shim and native test fixtures, then builds all 6 flavours). These images require a Windows Docker engine. If Docker Desktop has a `desktop-windows` context, select it for the current PowerShell session with `$env:DOCKER_CONTEXT = 'desktop-windows'`.
 
   ```powershell
   docker build -t adaskothebeast/nanoserver:<flavour> .
@@ -191,6 +190,8 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ### 3️⃣ COM & STA Interop Test Container (run from `<folder>\Tests\` or root `.\test.ps1`)
 
+If you haven't run root `.\go.ps1`, run `.\sta-shim\build_shim.ps1` from the repository root to build and stage the native test fixtures.
+
 - 🔨 **`Tests\go.ps1`** — Build the COM & STA test container on top of the base image:
 
   ```powershell
@@ -207,50 +208,85 @@ Each flavour uses the same simple PowerShell (`.ps1`) scripts:
 
 ## 🐳 Docker Hub Tags (`adaskothebeast/nanoserver`)
 
-Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v2.0.0`, `-v2.0`, `-v2`). The examples below show what the scripts are configured to push, not which tags are already published.
+Each `push.ps1` tags and pushes a floating flavour tag plus exact, minor, and major version tags with the container revision suffix (`-v2.1.0`, `-v2.1`, `-v2`). The examples below show what the scripts are configured to push, not which tags are already published.
 
 To bump the 3-tier version tags (`x.x.x`, `x.x`, and `x`) across all 6 subfolder `push.ps1` files at once, run **`set-version.ps1`**:
 
 ```powershell
-# Updates all 6 push.ps1 files (both tag and push lines) to -v2.0.0, -v2.0, and -v2
-.\set-version.ps1 -Version 2.0.0
+# Updates all 6 push.ps1 files (both tag and push lines) to -v2.1.0, -v2.1, and -v2
+.\set-version.ps1 -Version 2.1.0
 
 # Optional: also set the .NET runtime version in Dockerfiles & push.ps1 files
-.\set-version.ps1 -Version 2.0.0 -DotNetVersion 11.0.0
+.\set-version.ps1 -Version 2.1.0 -DotNetVersion 11.0.0
 ```
 
 - **ASP.NET Core 11 (`x86` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x86`
-  - `adaskothebeast/nanoserver:aspnet-x86-11.0.0-ltsc2025-v2.0.0`
-  - `adaskothebeast/nanoserver:aspnet-x86-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-11.0.0-ltsc2025-v2.1.0`
+  - `adaskothebeast/nanoserver:aspnet-x86-11.0-ltsc2025-v2.1`
   - `adaskothebeast/nanoserver:aspnet-x86-11-ltsc2025-v2`
 - **ASP.NET Core 11 (`x64` Kestrel):**
   - `adaskothebeast/nanoserver:aspnet-x64`
-  - `adaskothebeast/nanoserver:aspnet-x64-11.0.0-ltsc2025-v2.0.0`
-  - `adaskothebeast/nanoserver:aspnet-x64-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-11.0.0-ltsc2025-v2.1.0`
+  - `adaskothebeast/nanoserver:aspnet-x64-11.0-ltsc2025-v2.1`
   - `adaskothebeast/nanoserver:aspnet-x64-11-ltsc2025-v2`
 - **IIS 10 + ASP.NET Core 11 (`x86` OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x86`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-11.0.0-ltsc2025-v2.0.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x86-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-11.0.0-ltsc2025-v2.1.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x86-11.0-ltsc2025-v2.1`
   - `adaskothebeast/nanoserver:iis-aspnet-x86-11-ltsc2025-v2`
 - **IIS 10 + ASP.NET Core 11 (`x64` InProcess / OutOfProcess):**
   - `adaskothebeast/nanoserver:iis-aspnet-x64`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-11.0.0-ltsc2025-v2.0.0`
-  - `adaskothebeast/nanoserver:iis-aspnet-x64-11.0-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-11.0.0-ltsc2025-v2.1.0`
+  - `adaskothebeast/nanoserver:iis-aspnet-x64-11.0-ltsc2025-v2.1`
   - `adaskothebeast/nanoserver:iis-aspnet-x64-11-ltsc2025-v2`
 - **IIS 10 + .NET Framework 4.8.1 (`x86`):**
   - `adaskothebeast/nanoserver:iis-netfx-x86`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v2.0.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8.1-ltsc2025-v2.1.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x86-4.8-ltsc2025-v2.1`
   - `adaskothebeast/nanoserver:iis-netfx-x86-4-ltsc2025-v2`
 - **IIS 10 + .NET Framework 4.8.1 (`x64`):**
   - `adaskothebeast/nanoserver:iis-netfx-x64`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v2.0.0`
-  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v2.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8.1-ltsc2025-v2.1.0`
+  - `adaskothebeast/nanoserver:iis-netfx-x64-4.8-ltsc2025-v2.1`
   - `adaskothebeast/nanoserver:iis-netfx-x64-4-ltsc2025-v2`
 
 ---
+
+## What's New in `v2.1.0`
+
+### wkhtmltox PDF rendering on Nano Server
+
+The native shim can run **wkhtmltox 0.12.6 x64** directly on Nano Server 2025
+for headless HTML-to-PDF conversion. The shim adds the missing GDI exports
+`GetCharABCWidthsFloatW` and `ResetDCW` and provides opt-in font enumeration,
+metrics, TrueType tables, and glyph outlines.
+
+1. Use a Nano image built with the `2.1.0` shim and set
+   `NANOSERVER_ENABLE_HEADLESS_FONTS=1` before starting the process.
+2. Put an app-local `winspool.drv` beside `wkhtmltox.dll` for `EnumFormsW`.
+   The copy from `mcr.microsoft.com/dotnet/sdk:11.0-windowsservercore-ltsc2025`
+   was verified for PDF conversion and can be copied from the SDK build stage:
+
+   ```dockerfile
+   COPY --from=build ["C:/Windows/System32/winspool.drv", "C:/app/winspool.drv"]
+   ```
+
+   This assumes the published `wkhtmltox.dll` is in `C:\app`. Leave Nano's
+   `comdlg32.dll` and `imm32.dll` forwarders in place.
+3. Use the built-in Lucida Console or install licensed static TrueType
+   (`.ttf`) faces in `C:\Windows\Fonts`. Register each additional face under
+   `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts` before startup.
+   Select the family, weight, and style in CSS. The shim matches the nearest
+   installed style and defaults to Lucida Console when present if the requested
+   family is unavailable.
+
+On Nano Server 2025 x64, the direct rendering probe produced visible,
+extractable Unicode text and embedded Arial Regular, Bold, Italic, and Times
+New Roman in one PDF. Font API regressions also passed on x86 under WoW64.
+This is scoped PDF support, not full Server Core rendering parity or physical
+printing support. Per-user fonts, web fonts, font collections, variable fonts,
+and CFF outlines are not supported.
 
 ## What's New in `v2.0.0`
 
@@ -446,7 +482,7 @@ and `WAS`/`W3SVC` host-loss qualification pass across all six flavours; see
 | Queue lifetime (R08) | Only an owner creates its queue; FLS cleanup removes its windows, timers and queued work at normal thread exit | Posting to another thread without an initialized queue fails. Forced thread termination and fiber-hosted workloads are not qualified. |
 | Timers, waits and queue status (R05, R06) | Lazy owner-thread deadlines, low-priority `WM_TIMER`, replacement/cancellation, typed current/changed queue bits, wake masks and the three documented MWMO flags | Timer delivery requires pumping and is not real-time; coalescing tolerance is ignored. Wait-all uses bounded waits to keep servicing sent messages. No physical input or painting subsystem. |
 | ANSI window, class, message and clipboard APIs (`v1.4.0+`) | `RegisterClass[Ex]A`, `UnregisterClassA`, `GetClassInfo[Ex]A`, `GetClassNameA`, `Get/SetClassLongA`, `CreateWindowExA`, `DefWindowProcA`, `CallWindowProcA`, `Get/SetWindowLong[Ptr]A`, `Peek/Get/Dispatch/Post/SendMessageA`, `PostThreadMessageA`, and `Register/GetClipboardFormat[Name]A` bridged to the user-mode STA window engine | Headless STA windowing and message dispatch only; does not translate complex message-specific ANSI/Unicode `lParam` structures beyond `WM_NCCREATE`/`WM_CREATE`. |
-| Headless GDI, screen metrics, DDE & OLE1 forwarders (`v1.4.0+`) | 96-DPI headless device contexts (`GetDC`, `GetDeviceCaps`, `GetStockObject`, `GetSystemMetrics`, `SelectObject`, `DeleteObject`, `GetTextMetricsA/W`, `GetSysColorBrush`) plus 35 static PE forwarders across `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll` | Synthetic handles and fixed 96-DPI/font metrics for headless runtime startup (`msvbvm60.dll`, VCL, ATL). Not a replacement for a physical display, GDI rendering, or DDE conversation transport. |
+| Headless GDI, screen metrics, DDE & OLE1 forwarders (`v1.4.0+`) | 96-DPI headless device contexts (`GetDC`, `GetDeviceCaps`, `GetStockObject`, `GetSystemMetrics`, `SelectObject`, `DeleteObject`, `GetTextMetricsA/W`, `GetSysColorBrush`) plus static PE forwarders across `user32.dll` (DDE), `gdi32.dll`, and `ole32.dll`. `GetCharABCWidthsFloatW` returns fixed `(0, 8, 0)` advances; `ResetDCW` keeps a synthetic DC unchanged when no `DEVMODEW` is supplied. | Synthetic handles and fixed 96-DPI/font metrics for headless runtime startup (`msvbvm60.dll`, VCL, ATL). No font measurement, printer settings, physical display, GDI rendering, or DDE conversation transport. |
 | Visual C++ 10.0 / MFC 10.0, GDI+ & `shell32.dll` broken-forwarder redirection (`v1.5.0+`) | Pre-installed 32-bit `msvcr100.dll`, `msvcp100.dll`, `atl100.dll`, `mfc100.dll`, `mfc100u.dll`, `msimg32.dll`, and `gdiplus.dll` in `SysWOW64`; 40 additional `gdi32.dll` path/transform/metafile/region/palette exports, `user32!MapVirtualKeyExA`, `winspool.drv!GetJobA`, `winmm!PlaySoundA`, and redirection of `shell32.dll`'s broken `windows.storage.dll.*` forwarders (`SHGetPathFromIDListW`, `DragQueryFileW`, `SHGetSpecialFolderLocation`) | Headless compatibility stubs so `mfc100u.dll`, `mfc100.dll`, and `gdiplus.dll` load and initialize cleanly in headless containers; does not provide interactive shell dialogs, printing, audio playback, or full metafile rendering. |
 | Embarcadero / Borland Delphi VCL exports, headless primary monitor & per-monitor DPI (`v1.6.0+`) | 22 additional PE forwarder exports across `gdi32.dll` (`CopyEnhMetaFileW`, `GetEnhMetaFileDescriptionA/W`, `GetTextCharacterExtra`), `user32.dll` (`LoadCursorFromFileA/W`, `SetGestureConfig`), `ole32.dll` (`IsEqualGUID`), `comctl32.dll` (12 `FlatSB_*` exports), and `winmm.dll` (`sndPlaySoundA/W` + `PlaySoundA` forwarder patching); 11 monitor/DPI exports providing a synthetic `1024x768` primary monitor (`HMONITOR = 0x00010001`, `EnumDisplayMonitors`, `MonitorFromPoint/Rect/Window`, `GetMonitorInfoA/W`) and 96-DPI scaling (`GetSystemMetricsForDpi`, `GetDpiForMonitor/Internal/System/Window` + `SHCore.dll` delay-load hooking) | Single synthetic 96-DPI primary monitor (`\\.\DISPLAY1`) for headless VCL `TScreen` / `TCustomForm` initialization; does not emulate multi-monitor topologies or dynamic DPI changes. |
 | Registration-free TypeLib redirection (`v1.4.0+`) | Hooks `oleaut32.dll` (`ext-ms-win-sxs-oleautomation-l1-1-0!SxsOleAut32RedirectTypeLibrary`) and scans loaded modules in the current process for embedded `TYPELIB` resources matching the requested `LIBID` via `LoadTypeLibEx(..., REGKIND_NONE, ...)` | Resolves `TYPELIB` resources embedded in already-loaded process DLLs; external standalone `.tlb` files that are not loaded as modules require explicit loading or registry entries. |

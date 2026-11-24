@@ -11,6 +11,7 @@
 #include <oleidl.h>
 #include <ComSvcs.h>
 #include <limits.h>
+#include <cstddef>
 #include <new>
 #include <stdio.h>
 #include <vector>
@@ -2193,6 +2194,17 @@ int WINAPI Shim_GetClipboardFormatNameA(UINT format, LPSTR output, int capacity)
 
 // --- Headless GDI, DC, Stock Object, Font, Metric, and Color Shims ---
 
+const HDC kHeadlessDisplayDC = reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+const HDC kHeadlessCompatibleDC = reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+constexpr int kHeadlessCharAdvance = 8;
+
+#include "headless_font.h"
+
+bool IsHeadlessDC(HDC hdc) {
+    return hdc == kHeadlessDisplayDC || hdc == kHeadlessCompatibleDC ||
+        (HeadlessFont::InstalledFonts() && HeadlessFont::IsDC(hdc));
+}
+
 HGDIOBJ WINAPI Shim_GetStockObject(int index) {
     if (index < 0 || index > 32) return nullptr;
     return reinterpret_cast<HGDIOBJ>(static_cast<ULONG_PTR>(0x53484F00u + static_cast< UINT>(index)));
@@ -2200,19 +2212,19 @@ HGDIOBJ WINAPI Shim_GetStockObject(int index) {
 
 HDC WINAPI Shim_GetDC(HWND hWnd) {
     (void)hWnd;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+    return kHeadlessDisplayDC;
 }
 
 HDC WINAPI Shim_GetDCEx(HWND hWnd, HRGN hrgnClip, DWORD flags) {
     (void)hWnd;
     (void)hrgnClip;
     (void)flags;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+    return kHeadlessDisplayDC;
 }
 
 HDC WINAPI Shim_GetWindowDC(HWND hWnd) {
     (void)hWnd;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+    return kHeadlessDisplayDC;
 }
 
 int WINAPI Shim_ReleaseDC(HWND hWnd, HDC hDC) {
@@ -2223,11 +2235,15 @@ int WINAPI Shim_ReleaseDC(HWND hWnd, HDC hDC) {
 
 HDC WINAPI Shim_CreateCompatibleDC(HDC hDC) {
     (void)hDC;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+    if (HeadlessFont::InstalledFonts()) return HeadlessFont::CreateDC();
+    return kHeadlessCompatibleDC;
 }
 
 BOOL WINAPI Shim_DeleteDC(HDC hDC) {
-    (void)hDC;
+    if (HeadlessFont::InstalledFonts() && !HeadlessFont::DeleteDC(hDC) && !IsHeadlessDC(hDC)) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -2413,7 +2429,12 @@ extern "C" UINT WINAPI Shim_GetDpiForWindow(HWND hwnd) {
 }
 
 int WINAPI Shim_GetObjectW(HANDLE h, int c, LPVOID pv) {
-    (void)h;
+    LOGFONTW font;
+    if (HeadlessFont::InstalledFonts() && HeadlessFont::GetLogicalFont(h, font)) {
+        if (pv && c < static_cast<int>(sizeof(font))) return 0;
+        if (pv) memcpy(pv, &font, sizeof(font));
+        return sizeof(font);
+    }
     if (!pv) return sizeof(LOGFONTW);
     if (c <= 0) return 0;
     memset(pv, 0, static_cast<size_t>(c));
@@ -2467,17 +2488,18 @@ DWORD WINAPI Shim_GetObjectType(HGDIOBJ h) {
 }
 
 HGDIOBJ WINAPI Shim_GetCurrentObject(HDC hdc, UINT type) {
-    (void)hdc;
+    if (type == OBJ_FONT && HeadlessFont::InstalledFonts()) return HeadlessFont::Current(hdc);
     return reinterpret_cast<HGDIOBJ>(static_cast<ULONG_PTR>(0x53484F40u + (type & 0x1Fu)));
 }
 
 HGDIOBJ WINAPI Shim_SelectObject(HDC hdc, HGDIOBJ h) {
-    (void)hdc;
+    HGDIOBJ previous;
+    if (HeadlessFont::InstalledFonts() && HeadlessFont::Select(hdc, h, previous)) return previous;
     return h ? h : reinterpret_cast<HGDIOBJ>(static_cast<ULONG_PTR>(0x53484F01u));
 }
 
 BOOL WINAPI Shim_DeleteObject(HGDIOBJ ho) {
-    (void)ho;
+    if (HeadlessFont::InstalledFonts() && HeadlessFont::IsFontToken(ho)) return HeadlessFont::DeleteFont(ho);
     return TRUE;
 }
 
@@ -2492,7 +2514,7 @@ HBRUSH WINAPI Shim_CreateBrushIndirect(const LOGBRUSH* plbrush) {
 }
 
 HFONT WINAPI Shim_CreateFontIndirectW(const LOGFONTW* lplf) {
-    (void)lplf;
+    if (const auto* catalog = HeadlessFont::InstalledFonts()) return HeadlessFont::CreateFont(*catalog, lplf);
     return reinterpret_cast<HFONT>(static_cast<ULONG_PTR>(0x53484601u));
 }
 
@@ -2518,8 +2540,14 @@ HBITMAP WINAPI Shim_CreateBitmap(int nWidth, int nHeight, UINT nPlanes, UINT nBi
 }
 
 BOOL WINAPI Shim_GetTextMetricsW(HDC hdc, LPTEXTMETRICW lptm) {
-    (void)hdc;
     if (!lptm) return FALSE;
+    if (const auto* catalog = HeadlessFont::InstalledFonts()) {
+        auto [face, px] = HeadlessFont::SelectedFont(*catalog, hdc);
+        if (face) {
+            *lptm = HeadlessFont::Metrics(*face, px);
+            return TRUE;
+        }
+    }
     memset(lptm, 0, sizeof(*lptm));
     lptm->tmHeight = 16;
     lptm->tmAscent = 13;
@@ -2557,7 +2585,7 @@ BOOL WINAPI Shim_GetTextExtentPoint32W(HDC hdc, LPCWSTR lpString, int c, LPSIZE 
     (void)hdc;
     if (!psizl) return FALSE;
     if (c < 0) c = lpString ? static_cast<int>(wcslen(lpString)) : 0;
-    psizl->cx = (c > 0) ? (c * 8) : 0;
+    psizl->cx = (c > 0) ? (c * kHeadlessCharAdvance) : 0;
     psizl->cy = 16;
     return TRUE;
 }
@@ -2850,9 +2878,9 @@ HDC WINAPI Shim_BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint) {
     (void)hWnd;
     if (lpPaint) {
         memset(lpPaint, 0, sizeof(*lpPaint));
-        lpPaint->hdc = reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+        lpPaint->hdc = kHeadlessDisplayDC;
     }
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484401u));
+    return kHeadlessDisplayDC;
 }
 
 BOOL WINAPI Shim_EndPaint(HWND hWnd, const PAINTSTRUCT* lpPaint) {
@@ -3070,7 +3098,7 @@ HDC WINAPI Shim_CreateDCA(LPCSTR pszDriver, LPCSTR pszDevice, LPCSTR pszPort, co
     (void)pszDevice;
     (void)pszPort;
     (void)pdm;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+    return kHeadlessCompatibleDC;
 }
 
 HDC WINAPI Shim_CreateDCW(LPCWSTR pszDriver, LPCWSTR pszDevice, LPCWSTR pszPort, const DEVMODEW* pdm) {
@@ -3078,7 +3106,7 @@ HDC WINAPI Shim_CreateDCW(LPCWSTR pszDriver, LPCWSTR pszDevice, LPCWSTR pszPort,
     (void)pszDevice;
     (void)pszPort;
     (void)pdm;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+    return kHeadlessCompatibleDC;
 }
 
 extern "C" HDC WINAPI Shim_CreateICA(LPCSTR pszDriver, LPCSTR pszDevice, LPCSTR pszPort, const DEVMODEA* pdm) {
@@ -3086,7 +3114,7 @@ extern "C" HDC WINAPI Shim_CreateICA(LPCSTR pszDriver, LPCSTR pszDevice, LPCSTR 
     (void)pszDevice;
     (void)pszPort;
     (void)pdm;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+    return kHeadlessCompatibleDC;
 }
 
 HDC WINAPI Shim_CreateICW(LPCWSTR pszDriver, LPCWSTR pszDevice, LPCWSTR pszPort, const DEVMODEW* pdm) {
@@ -3094,7 +3122,7 @@ HDC WINAPI Shim_CreateICW(LPCWSTR pszDriver, LPCWSTR pszDevice, LPCWSTR pszPort,
     (void)pszDevice;
     (void)pszPort;
     (void)pdm;
-    return reinterpret_cast<HDC>(static_cast<ULONG_PTR>(0x53484402u));
+    return kHeadlessCompatibleDC;
 }
 
 extern "C" int WINAPI Shim_Escape(HDC hdc, int iEscape, int cjIn, LPCSTR pvIn, LPVOID pvOut) {
@@ -3122,6 +3150,19 @@ extern "C" BOOL WINAPI Shim_Pie(
 
 extern "C" HDC WINAPI Shim_ResetDCA(HDC hdc, const DEVMODEA* lpInitData) {
     (void)lpInitData;
+    return hdc;
+}
+
+extern "C" HDC WINAPI Shim_ResetDCW(HDC hdc, const DEVMODEW* lpInitData) {
+    if (!IsHeadlessDC(hdc)) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return nullptr;
+    }
+    // Synthetic DCs have no printer settings or driver state to change.
+    if (lpInitData) {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return nullptr;
+    }
     return hdc;
 }
 
@@ -3298,11 +3339,210 @@ extern "C" int WINAPI Shim_EnumFontsA(HDC hdc, LPCSTR lpLogfont, FONTENUMPROCA l
     return 1;
 }
 
+extern "C" int WINAPI Shim_EnumFontFamiliesExW(HDC hdc, LPLOGFONTW filter, FONTENUMPROCW callback,
+    LPARAM param, DWORD flags) {
+    const auto* catalog = HeadlessFont::InstalledFonts();
+    if (!catalog) { SetLastError(ERROR_PROC_NOT_FOUND); return 0; }
+    if (!filter || !callback || flags) { SetLastError(ERROR_INVALID_PARAMETER); return 0; }
+    if (!HeadlessFont::IsDC(hdc)) { SetLastError(ERROR_INVALID_HANDLE); return 0; }
+    if (filter->lfCharSet != DEFAULT_CHARSET && filter->lfCharSet != ANSI_CHARSET) return 1;
+    int result = 1;
+    for (const auto& face : catalog->faces) {
+        if (filter->lfFaceName[0] && _wcsnicmp(filter->lfFaceName, face->family, LF_FACESIZE)) continue;
+        ENUMLOGFONTEXW font{};
+        NEWTEXTMETRICEXW metric{};
+        const auto tm = HeadlessFont::Metrics(*face, 12);
+        font.elfLogFont.lfHeight = tm.tmHeight;
+        font.elfLogFont.lfWeight = tm.tmWeight;
+        font.elfLogFont.lfItalic = tm.tmItalic;
+        font.elfLogFont.lfCharSet = tm.tmCharSet;
+        font.elfLogFont.lfPitchAndFamily = face->fixedPitch ? FIXED_PITCH | FF_MODERN : VARIABLE_PITCH;
+        wcscpy_s(font.elfLogFont.lfFaceName, face->family);
+        wcscpy_s(font.elfFullName, face->fullName);
+        wcscpy_s(font.elfStyle, face->style);
+        wcscpy_s(font.elfScript, L"Western");
+        memcpy(&metric.ntmTm, &tm, FIELD_OFFSET(NEWTEXTMETRICW, ntmFlags));
+        metric.ntmTm.ntmSizeEM = face->em;
+        for (unsigned i = 0; i < 4; ++i) metric.ntmFontSig.fsUsb[i] = face->os2.U32(42 + i * 4);
+        for (unsigned i = 0; i < 2; ++i) metric.ntmFontSig.fsCsb[i] = face->os2.U32(78 + i * 4);
+        result = callback(&font.elfLogFont, reinterpret_cast<const TEXTMETRICW*>(&metric), TRUETYPE_FONTTYPE, param);
+        if (!result) break;
+    }
+    return result;
+}
+
+extern "C" DWORD WINAPI Shim_GetFontData(HDC hdc, DWORD table, DWORD offset, PVOID buffer, DWORD size) {
+    const auto* catalog = HeadlessFont::InstalledFonts();
+    if (!catalog) { SetLastError(ERROR_PROC_NOT_FOUND); return 0; }
+    const auto* face = HeadlessFont::SelectedFont(*catalog, hdc).face;
+    if (!face) { SetLastError(ERROR_INVALID_HANDLE); return GDI_ERROR; }
+    const auto bytes = face->Table(table);
+    if (!bytes.ptr || offset > bytes.size) { SetLastError(ERROR_INVALID_PARAMETER); return GDI_ERROR; }
+    DWORD available = static_cast<DWORD>(bytes.size) - offset;
+    if (!buffer || !size) return available;
+    DWORD copied = (std::min)(available, size);
+    memcpy(buffer, bytes.ptr + offset, copied);
+    return copied;
+}
+
+extern "C" int WINAPI Shim_GetTextFaceW(HDC hdc, int size, LPWSTR name) {
+    const auto* catalog = HeadlessFont::InstalledFonts();
+    if (!catalog) { SetLastError(ERROR_PROC_NOT_FOUND); return 0; }
+    const auto* face = HeadlessFont::SelectedFont(*catalog, hdc).face;
+    if (!face) { SetLastError(ERROR_INVALID_HANDLE); return 0; }
+    const int length = static_cast<int>(wcslen(face->family));
+    if (!name) return length + 1;
+    if (size <= 0) { SetLastError(ERROR_INVALID_PARAMETER); return 0; }
+    int count = (std::min)(size - 1, length);
+    wmemcpy(name, face->family, count);
+    name[count] = 0;
+    return count;
+}
+
+extern "C" UINT WINAPI Shim_GetOutlineTextMetricsW(HDC hdc, UINT size, LPOUTLINETEXTMETRICW output) {
+    const auto* catalog = HeadlessFont::InstalledFonts();
+    if (!catalog) { SetLastError(ERROR_PROC_NOT_FOUND); return 0; }
+    const auto [face, px] = HeadlessFont::SelectedFont(*catalog, hdc);
+    if (!face) { SetLastError(ERROR_INVALID_HANDLE); return 0; }
+    const auto cb = [](const wchar_t* value) { return static_cast<UINT>((wcslen(value) + 1) * sizeof(wchar_t)); };
+    constexpr UINT family = sizeof(OUTLINETEXTMETRICW);
+    const UINT style = family + cb(face->family);
+    const UINT full = style + cb(face->style);
+    const UINT required = full + cb(face->fullName);
+    if (!output) return required;
+    if (size < required) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return 0; }
+    OUTLINETEXTMETRICW metrics{};
+    metrics.otmSize = required;
+    metrics.otmTextMetrics = HeadlessFont::Metrics(*face, px);
+    metrics.otmEMSquare = face->em;
+    metrics.otmfsType = face->os2.U16(8);
+    metrics.otmItalicAngle = static_cast<LONG>(face->post.U32(4)) / 65536;
+    metrics.otmAscent = metrics.otmTextMetrics.tmAscent;
+    metrics.otmDescent = -metrics.otmTextMetrics.tmDescent;
+    metrics.otmLineGap = metrics.otmTextMetrics.tmExternalLeading;
+    metrics.otmsUnderscoreSize = MulDiv(face->post.S16(10), px, face->em);
+    metrics.otmsUnderscorePosition = MulDiv(face->post.S16(8), px, face->em);
+    metrics.otmsXHeight = MulDiv(face->os2.S16(86), px, face->em);
+    auto scaled = [face, px](int value) { return MulDiv(value, px, face->em); };
+    metrics.otmrcFontBox = {scaled(face->head.S16(36)), scaled(face->head.S16(42)),
+        scaled(face->head.S16(40)), scaled(face->head.S16(38))};
+    metrics.otmpFamilyName = reinterpret_cast<PSTR>(static_cast<ULONG_PTR>(family));
+    metrics.otmpStyleName = reinterpret_cast<PSTR>(static_cast<ULONG_PTR>(style));
+    metrics.otmpFaceName = metrics.otmpFullName = reinterpret_cast<PSTR>(static_cast<ULONG_PTR>(full));
+    memcpy(output, &metrics, sizeof(metrics));
+    auto* bytes = reinterpret_cast<BYTE*>(output);
+    memcpy(bytes + family, face->family, cb(face->family));
+    memcpy(bytes + style, face->style, cb(face->style));
+    memcpy(bytes + full, face->fullName, cb(face->fullName));
+    return required;
+}
+
+extern "C" DWORD WINAPI Shim_GetGlyphOutlineW(HDC hdc, UINT character, UINT format,
+    LPGLYPHMETRICS output, DWORD size, LPVOID buffer, const MAT2* matrix) {
+    const auto* catalog = HeadlessFont::InstalledFonts();
+    if (!catalog) { SetLastError(ERROR_PROC_NOT_FOUND); return 0; }
+    const auto [face, px] = HeadlessFont::SelectedFont(*catalog, hdc);
+    if (!face) { SetLastError(ERROR_INVALID_HANDLE); return GDI_ERROR; }
+    if (!output || !matrix) { SetLastError(ERROR_INVALID_PARAMETER); return GDI_ERROR; }
+    UINT mode = format & ~(GGO_GLYPH_INDEX | GGO_UNHINTED);
+    if ((mode != GGO_METRICS && mode != GGO_NATIVE) ||
+        matrix->eM11.value != 1 || matrix->eM22.value != 1 || matrix->eM12.value || matrix->eM21.value ||
+        matrix->eM11.fract || matrix->eM22.fract || matrix->eM12.fract || matrix->eM21.fract) {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return GDI_ERROR;
+    }
+    unsigned glyph = format & GGO_GLYPH_INDEX ? character : face->Glyph(character);
+    if (glyph >= face->glyphCount) { SetLastError(ERROR_INVALID_PARAMETER); return GDI_ERROR; }
+    auto box = face->GlyphData(glyph);
+    int left = MulDiv(box.S16(2), px, face->em), bottom = MulDiv(box.S16(4), px, face->em);
+    int right = MulDiv(box.S16(6), px, face->em), top = MulDiv(box.S16(8), px, face->em);
+    *output = {};
+    output->gmBlackBoxX = (std::max)(0, right - left);
+    output->gmBlackBoxY = (std::max)(0, top - bottom);
+    output->gmptGlyphOrigin = {left, top};
+    output->gmCellIncX = static_cast<SHORT>((std::min)(32767, MulDiv(face->Advance(glyph), px, face->em)));
+    if (mode == GGO_METRICS) return 0;
+    try {
+        std::vector<BYTE> outline;
+        if (!HeadlessFont::NativeOutline(*face, glyph, px, outline)) {
+            SetLastError(ERROR_INVALID_DATA);
+            return GDI_ERROR;
+        }
+        if (buffer && size) {
+            if (size < outline.size()) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return GDI_ERROR; }
+            if (!outline.empty()) memcpy(buffer, outline.data(), outline.size());
+        }
+        return static_cast<DWORD>(outline.size());
+    } catch (const std::bad_alloc&) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return GDI_ERROR;
+    }
+}
+
 extern "C" BOOL WINAPI Shim_GetBrushOrgEx(HDC hdc, LPPOINT lppt) {
     (void)hdc;
     if (!lppt) return FALSE;
     lppt->x = 0;
     lppt->y = 0;
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_GetCharABCWidthsFloatW(HDC hdc, UINT first, UINT last, LPABCFLOAT widths) {
+    if (!IsHeadlessDC(hdc)) {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (!widths || first > last || last > MAXWORD) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (const auto* catalog = HeadlessFont::InstalledFonts()) {
+        const auto [face, px] = HeadlessFont::SelectedFont(*catalog, hdc);
+        if (!face) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+        for (UINT ch = first; ch <= last; ++ch) {
+            auto abc = HeadlessFont::Widths(*face, face->Glyph(ch), px);
+            widths[ch - first] = {static_cast<float>(abc.abcA), static_cast<float>(abc.abcB),
+                static_cast<float>(abc.abcC)};
+        }
+        return TRUE;
+    }
+    std::fill_n(widths, last - first + 1, ABCFLOAT{0.0f, kHeadlessCharAdvance, 0.0f});
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_GetCharABCWidthsW(HDC hdc, UINT first, UINT last, LPABC widths) {
+    const auto* catalog = HeadlessFont::InstalledFonts();
+    if (!catalog) { SetLastError(ERROR_PROC_NOT_FOUND); return FALSE; }
+    const auto [face, px] = HeadlessFont::SelectedFont(*catalog, hdc);
+    if (!face) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+    if (!widths || first > last || last > MAXWORD) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    for (UINT ch = first; ch <= last; ++ch)
+        widths[ch - first] = HeadlessFont::Widths(*face, face->Glyph(ch), px);
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI Shim_GetCharWidthI(HDC hdc, UINT first, UINT count, LPWORD glyphs, LPINT widths) {
+    const auto* catalog = HeadlessFont::InstalledFonts();
+    if (!catalog) { SetLastError(ERROR_PROC_NOT_FOUND); return FALSE; }
+    const auto [face, px] = HeadlessFont::SelectedFont(*catalog, hdc);
+    if (!face) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+    if (!widths || !count || count > MAXWORD + 1u ||
+        (!glyphs && (first >= face->glyphCount || count > face->glyphCount - first))) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (glyphs) {
+        for (UINT i = 0; i < count; ++i) {
+            if (glyphs[i] < face->glyphCount) continue;
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+    }
+    for (UINT i = 0; i < count; ++i)
+        widths[i] = MulDiv(face->Advance(glyphs ? glyphs[i] : first + i), px, face->em);
     return TRUE;
 }
 
@@ -4171,11 +4411,13 @@ const ExportMapping kExportTable[] = {
     {"EnumFontsA", reinterpret_cast<PVOID>(Shim_EnumFontsA)},
     {"Escape", reinterpret_cast<PVOID>(Shim_Escape)},
     {"GetBrushOrgEx", reinterpret_cast<PVOID>(Shim_GetBrushOrgEx)},
+    {"GetCharABCWidthsFloatW", reinterpret_cast<PVOID>(Shim_GetCharABCWidthsFloatW)},
     {"GetNearestColor", reinterpret_cast<PVOID>(Shim_GetNearestColor)},
     {"GetTextExtentPointA", reinterpret_cast<PVOID>(Shim_GetTextExtentPointA)},
     {"Pie", reinterpret_cast<PVOID>(Shim_Pie)},
     {"PtInRegion", reinterpret_cast<PVOID>(Shim_PtInRegion)},
     {"ResetDCA", reinterpret_cast<PVOID>(Shim_ResetDCA)},
+    {"ResetDCW", reinterpret_cast<PVOID>(Shim_ResetDCW)},
     {"RoundRect", reinterpret_cast<PVOID>(Shim_RoundRect)},
     {"ScaleViewportExtEx", reinterpret_cast<PVOID>(Shim_ScaleViewportExtEx)},
     {"ScaleWindowExtEx", reinterpret_cast<PVOID>(Shim_ScaleWindowExtEx)},
